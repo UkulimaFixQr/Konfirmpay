@@ -9,10 +9,15 @@ app.get("/", (req, res) => {
 });
 
 app.post("/ussd", (req, res) => {
-  console.log("USSD REQUEST:", req.body);
+  const { text } = req.body;
 
   res.set("Content-Type", "text/plain");
-  res.send("END KonfirmPay USSD is connected");
+
+  if (!text || text === "") {
+    res.send("CON Enter amount to pay:");
+  } else {
+    res.send(`END You entered amount: KES ${text}`);
+  }
 });
 
 const PORT = process.env.PORT || 3000;
