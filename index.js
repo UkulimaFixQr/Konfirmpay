@@ -1,4 +1,5 @@
 const express = require("express");
+const crypto = require("crypto");
 const app = express();
 
 app.use(express.urlencoded({ extended: false }));
@@ -6,7 +7,38 @@ app.use(express.json());
 
 /**
  * ----------------------------------------------------
- * BASIC HEALTH CHECK
+ * CONFIG (TEMP – replace with env vars later)
+ * ----------------------------------------------------
+ */
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
+
+/**
+ * Minimal Supabase client (no SDK, simple fetch)
+ */
+async function supabase(query, params = {}) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${query}`, {
+    method: params.method || "GET",
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      "Content-Type": "application/json",
+      Prefer: "return=representation",
+    },
+    body: params.body ? JSON.stringify(params.body) : undefined,
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text);
+  }
+
+  return res.json();
+}
+
+/**
+ * ----------------------------------------------------
+ * HEALTH CHECK
  * ----------------------------------------------------
  */
 app.get("/", (req, res) => {
@@ -15,34 +47,79 @@ app.get("/", (req, res) => {
 
 /**
  * ----------------------------------------------------
- * USSD ENDPOINT (kept for future Africa's Talking use)
+ * ADMIN – REGISTER MERCHANT
+ * (simple endpoint for now)
  * ----------------------------------------------------
  */
-app.get("/ussd", (req, res) => {
-  res.set("Content-Type", "text/plain");
-  res.send("END KonfirmPay USSD endpoint is live");
-});
+app.post("/admin/merchant", async (req, res) => {
+  const { name, paybill, account, is_chain } = req.body;
 
-app.post("/ussd", (req, res) => {
-  res.set("Content-Type", "text/plain");
+  const merchant = await supabase("merchants", {
+    method: "POST",
+    body: { name, paybill, account, is_chain },
+  });
 
-  const text = req.body.text || "";
-
-  if (text === "") {
-    return res.send("CON Enter amount to pay:");
-  }
-
-  return res.send(`END You entered amount: KES ${text}`);
+  res.json(merchant[0]);
 });
 
 /**
  * ----------------------------------------------------
- * SIMULATED USSD FLOW (USED FOR NOW)
- * This replaces Africa's Talking sandbox during development
+ * ADMIN – GENERATE IMMUTABLE QR
  * ----------------------------------------------------
  */
-app.get("/simulate-ussd", (req, res) => {
-  const text = req.query.text || "";
+app.post("/admin/merchant/:id/generate-qr", async (req, res) => {
+  const merchantId = req.params.id;
+  const { store_name } = req.body;
+
+  const qrToken = "KPQR_" + crypto.randomBytes(4).toString("hex").toUpperCase();
+
+  const qr = await supabase("merchant_qrs", {
+    method: "POST",
+    body: {
+      merchant_id: merchantId,
+      qr_token: qrToken,
+      store_name,
+    },
+  });
+
+  res.json({
+    qr_token: qrToken,
+    ussd_code: `*384*${qrToken}#`,
+  });
+});
+
+/**
+ * ----------------------------------------------------
+ * SIMULATED USSD FLOW (CORE BUSINESS LOGIC)
+ * Format:
+ * 1st call: /simulate-ussd?qr=TOKEN
+ * 2nd call: /simulate-ussd?qr=TOKEN&text=20000
+ * 3rd call: /simulate-ussd?qr=TOKEN&text=20000*1
+ * ----------------------------------------------------
+ */
+app.get("/simulate-ussd", async (req, res) => {
+  const { qr, text = "", phone = "+254700000001" } = req.query;
+
+  if (!qr) {
+    return res.send("END Invalid QR");
+  }
+
+  // Resolve QR
+  const qrRows = await supabase(
+    `merchant_qrs?qr_token=eq.${qr}&status=eq.ACTIVE`
+  );
+
+  if (qrRows.length === 0) {
+    return res.send("END Invalid or disabled QR");
+  }
+
+  const qrRow = qrRows[0];
+
+  const merchants = await supabase(
+    `merchants?id=eq.${qrRow.merchant_id}`
+  );
+
+  const merchant = merchants[0];
 
   /**
    * STEP 1: Ask for amount
@@ -52,20 +129,28 @@ app.get("/simulate-ussd", (req, res) => {
   }
 
   /**
-   * STEP 2: Amount entered (no * yet)
+   * STEP 2: Amount entered
    */
   if (!text.includes("*")) {
     const amount = parseInt(text, 10);
-
     if (isNaN(amount) || amount <= 0) {
-      return res.send("END Invalid amount entered");
+      return res.send("END Invalid amount");
     }
 
-    // Verification fee calculation (LOCKED RULE)
-    let fee = 0;
-    if (amount <= 500) fee = 1;
-    else if (amount <= 5000) fee = 3;
-    else fee = 5;
+    let fee = amount <= 500 ? 1 : amount <= 5000 ? 3 : 5;
+
+    // Log transaction
+    await supabase("transactions", {
+      method: "POST",
+      body: {
+        merchant_id: merchant.id,
+        qr_id: qrRow.id,
+        phone,
+        amount,
+        verification_fee: fee,
+        status: "FEE_SHOWN",
+      },
+    });
 
     return res.send(
       `CON You will pay a KonfirmPay verification fee of KES ${fee}\n1. Continue\n2. Cancel`
@@ -73,14 +158,13 @@ app.get("/simulate-ussd", (req, res) => {
   }
 
   /**
-   * STEP 3: User selects option (amount*choice)
+   * STEP 3: Confirmation
    */
   const [amountText, choice] = text.split("*");
-  const amount = parseInt(amountText, 10);
 
   if (choice === "1") {
     return res.send(
-      "END Proceeding to KonfirmPay verification payment..."
+      `END Proceeding to verification.\nMerchant: ${merchant.name}`
     );
   }
 
@@ -89,7 +173,7 @@ app.get("/simulate-ussd", (req, res) => {
 
 /**
  * ----------------------------------------------------
- * SERVER START
+ * SERVER
  * ----------------------------------------------------
  */
 const PORT = process.env.PORT || 3000;
