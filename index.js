@@ -1,18 +1,21 @@
 const express = require("express");
 const path = require("path");
+const crypto = require("crypto");
+const fetch = (...args) =>
+  import("node-fetch").then(({ default: fetch }) => fetch(...args));
 
 const app = express();
 
 /**
  * ====================================================
- * BASIC LOGGING (VERY IMPORTANT FOR RENDER)
+ * STARTUP LOG
  * ====================================================
  */
-console.log("🚀 KonfirmPay server starting...");
+console.log("🚀 KonfirmPay server starting");
 
 /**
  * ====================================================
- * MIDDLEWARE (ORDER MATTERS)
+ * REQUEST LOGGING (RENDER VISIBILITY)
  * ====================================================
  */
 app.use((req, res, next) => {
@@ -20,16 +23,50 @@ app.use((req, res, next) => {
   next();
 });
 
+/**
+ * ====================================================
+ * BODY PARSERS
+ * ====================================================
+ */
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
 /**
  * ====================================================
- * SERVE STATIC FILES (ADMIN DASHBOARD)
+ * STATIC FILES (ADMIN DASHBOARD)
  * ====================================================
  */
-app.use(express.static(path.join(__dirname, "Public")));
-console.log("📁 Serving static files from /public");
+const publicPath = path.join(__dirname, "public");
+console.log("📁 Serving static files from:", publicPath);
+app.use(express.static(publicPath));
+
+/**
+ * ====================================================
+ * SUPABASE REST CLIENT
+ * ====================================================
+ */
+const { SUPABASE_URL, SUPABASE_KEY } = process.env;
+
+async function supabase(path, options = {}) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    method: options.method || "GET",
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      "Content-Type": "application/json",
+      Prefer: "return=representation"
+    },
+    body: options.body ? JSON.stringify(options.body) : undefined
+  });
+
+  if (!res.ok) {
+    const t = await res.text();
+    console.error("❌ Supabase error:", t);
+    throw new Error(t);
+  }
+
+  return res.json();
+}
 
 /**
  * ====================================================
@@ -37,73 +74,69 @@ console.log("📁 Serving static files from /public");
  * ====================================================
  */
 app.get("/", (req, res) => {
-  console.log("✅ Health check hit");
   res.send("KonfirmPay backend is running");
 });
 
 /**
  * ====================================================
- * ADMIN – REGISTER MERCHANT (DEBUG LOGS)
+ * ADMIN – REGISTER MERCHANT (REAL)
  * ====================================================
  */
-app.post("/admin/merchant", (req, res) => {
-  console.log("🧑‍💼 Register merchant request:", req.body);
+app.post("/admin/merchant", async (req, res) => {
+  try {
+    console.log("🧑‍💼 Register merchant:", req.body);
 
-  // TEMP RESPONSE (just to prove route works)
-  res.json({
-    status: "OK",
-    message: "Merchant endpoint reached",
-    data: req.body
-  });
+    const merchant = await supabase("merchants", {
+      method: "POST",
+      body: {
+        name: req.body.name,
+        paybill: req.body.paybill,
+        account: req.body.account,
+        is_chain: false,
+        status: "ACTIVE"
+      }
+    });
+
+    res.json(merchant[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 /**
  * ====================================================
- * ADMIN – GENERATE QR (DEBUG LOGS)
+ * ADMIN – GENERATE IMMUTABLE QR (REAL)
  * ====================================================
  */
-app.post("/admin/merchant/:id/generate-qr", (req, res) => {
-  console.log("📦 Generate QR for merchant:", req.params.id);
-  console.log("📄 Store name:", req.body.store_name);
+app.post("/admin/merchant/:id/generate-qr", async (req, res) => {
+  try {
+    console.log("📦 Generate QR for merchant:", req.params.id);
 
-  res.json({
-    qr_token: "KPQR_TEST123",
-    ussd_code: "*384*KPQR_TEST123#"
-  });
+    const qrToken =
+      "KPQR_" + crypto.randomBytes(4).toString("hex").toUpperCase();
+
+    const qr = await supabase("merchant_qrs", {
+      method: "POST",
+      body: {
+        merchant_id: req.params.id,
+        qr_token: qrToken,
+        store_name: req.body.store_name,
+        status: "ACTIVE"
+      }
+    });
+
+    res.json({
+      qr_token: qr[0].qr_token,
+      ussd_code: `*384*${qr[0].qr_token}#`
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 /**
  * ====================================================
- * SIMULATED USSD (DEBUG)
- * ====================================================
- */
-app.get("/simulate-ussd", (req, res) => {
-  console.log("📲 USSD simulation:", req.query);
-
-  const { text = "" } = req.query;
-
-  if (text === "") {
-    return res.send("CON Enter amount to pay:");
-  }
-
-  if (!text.includes("*")) {
-    return res.send(
-      "CON You will pay a KonfirmPay verification fee of KES 5\n1. Continue\n2. Cancel"
-    );
-  }
-
-  const [, choice] = text.split("*");
-
-  if (choice === "1") {
-    return res.send("END Proceeding to payment...");
-  }
-
-  return res.send("END Cancelled");
-});
-
-/**
- * ====================================================
- * GLOBAL ERROR HANDLER (IMPORTANT)
+ * ERROR HANDLER
  * ====================================================
  */
 app.use((err, req, res, next) => {
