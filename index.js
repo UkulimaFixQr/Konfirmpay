@@ -36,9 +36,9 @@ app.use(express.urlencoded({ extended: false }));
  * STATIC FILES (ADMIN DASHBOARD)
  * ====================================================
  */
-const publicPath = path.join(__dirname, "Public");
-console.log("📁 Serving static files from:", publicPath);
-app.use(express.static(publicPath));
+const PublicPath = path.join(__dirname, "Public");
+console.log("📁 Serving static files from:", PublicPath);
+app.use(express.static(PublicPath));
 
 /**
  * ====================================================
