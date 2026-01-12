@@ -28,7 +28,7 @@ app.use(express.urlencoded({ extended: false }));
  * SERVE STATIC FILES (ADMIN DASHBOARD)
  * ====================================================
  */
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.static(path.join(__dirname, "Public")));
 console.log("📁 Serving static files from /public");
 
 /**
