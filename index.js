@@ -15,7 +15,7 @@ console.log("🚀 KonfirmPay server starting");
 
 /**
  * ====================================================
- * REQUEST LOGGING (VISIBLE ON RENDER)
+ * REQUEST LOGGING (RENDER VISIBILITY)
  * ====================================================
  */
 app.use((req, res, next) => {
@@ -34,18 +34,14 @@ app.use(express.urlencoded({ extended: false }));
 /**
  * ====================================================
  * STATIC FILES (ADMIN DASHBOARD)
- * NOTE: FOLDER IS 'Public' WITH CAPITAL P
+ * NOTE: Folder is 'Public' (capital P)
  * ====================================================
  */
 const publicPath = path.join(__dirname, "Public");
 console.log("📁 Serving static files from:", publicPath);
 app.use(express.static(publicPath));
 
-/**
- * Explicit fallback (guarantees /admin.html works)
- */
 app.get("/admin.html", (req, res) => {
-  console.log("🛠 Explicit admin.html route hit");
   res.sendFile(path.join(publicPath, "admin.html"));
 });
 
@@ -95,12 +91,29 @@ app.post("/admin/merchant", async (req, res) => {
   try {
     console.log("🧑‍💼 Register merchant:", req.body);
 
+    const { name, paybill, account_number } = req.body;
+
+    if (!name || !paybill || !account_number) {
+      return res.status(400).json({ error: "Missing merchant fields" });
+    }
+
+    // Prevent duplicate merchant by paybill
+    const existing = await supabase(
+      `merchants?paybill=eq.${paybill}`
+    );
+
+    if (existing.length > 0) {
+      return res.status(400).json({
+        error: "Merchant with this paybill already exists"
+      });
+    }
+
     const merchant = await supabase("merchants", {
       method: "POST",
       body: {
-        name: req.body.name,
-        paybill: req.body.paybill,
-        account: req.body.account,
+        name,
+        paybill,
+        account_number,
         is_chain: false,
         status: "ACTIVE"
       }
