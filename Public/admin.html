@@ -9,19 +9,17 @@
       margin: 40px;
       background: #f5f5f5;
     }
-    h2 {
-      margin-top: 40px;
-    }
-    input, button {
+    h2 { margin-top: 30px; }
+    input, select, button {
       padding: 8px;
-      margin: 5px 0;
-      width: 300px;
+      margin: 6px 0;
+      width: 340px;
     }
     button {
-      cursor: pointer;
-      background: #222;
+      background: #111;
       color: white;
       border: none;
+      cursor: pointer;
     }
     .box {
       background: white;
@@ -33,28 +31,44 @@
       background: #eee;
       padding: 10px;
     }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: white;
+    }
+    th, td {
+      border: 1px solid #ddd;
+      padding: 8px;
+      font-size: 14px;
+    }
+    th { background: #eee; }
   </style>
 </head>
 <body>
 
 <h1>KonfirmPay Admin Dashboard</h1>
 
+<!-- REGISTER MERCHANT -->
 <div class="box">
   <h2>1. Register Merchant</h2>
 
   <input id="m_name" placeholder="Merchant name" /><br>
   <input id="m_paybill" placeholder="Paybill" /><br>
-  <input id="m_account" placeholder="Account name" /><br>
+  <input id="m_account_number" placeholder="Account number" /><br>
 
   <button onclick="registerMerchant()">Register Merchant</button>
 
   <pre id="merchant_result"></pre>
 </div>
 
+<!-- GENERATE QR -->
 <div class="box">
   <h2>2. Generate QR</h2>
 
-  <input id="merchant_id" placeholder="Merchant ID" /><br>
+  <select id="merchant_select">
+    <option value="">-- Select Merchant --</option>
+  </select><br>
+
   <input id="store_name" placeholder="Store name (e.g. Main Shop)" /><br>
 
   <button onclick="generateQR()">Generate QR</button>
@@ -62,41 +76,100 @@
   <pre id="qr_result"></pre>
 </div>
 
+<!-- TRANSACTIONS -->
+<div class="box">
+  <h2>3. Recent Transactions</h2>
+  <button onclick="loadTransactions()">Refresh</button><br><br>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Phone</th>
+        <th>Amount</th>
+        <th>Fee</th>
+        <th>Status</th>
+        <th>Date</th>
+      </tr>
+    </thead>
+    <tbody id="tx_table"></tbody>
+  </table>
+</div>
+
 <script>
-const BASE_URL = "";
+async function loadMerchants() {
+  const res = await fetch("/admin/merchants");
+  const merchants = await res.json();
+
+  const select = document.getElementById("merchant_select");
+  select.innerHTML = '<option value="">-- Select Merchant --</option>';
+
+  merchants.forEach(m => {
+    const opt = document.createElement("option");
+    opt.value = m.id;
+    opt.textContent = `${m.name} (Paybill ${m.paybill})`;
+    select.appendChild(opt);
+  });
+}
 
 async function registerMerchant() {
   const res = await fetch("/admin/merchant", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      name: document.getElementById("m_name").value,
-      paybill: document.getElementById("m_paybill").value,
-      account: document.getElementById("m_account").value,
-      is_chain: false
+      name: m_name.value.trim(),
+      paybill: m_paybill.value.trim(),
+      account_number: m_account_number.value.trim()
     })
   });
 
-  const data = await res.json();
-  document.getElementById("merchant_result").textContent =
-    JSON.stringify(data, null, 2);
+  merchant_result.textContent =
+    JSON.stringify(await res.json(), null, 2);
+
+  loadMerchants();
 }
 
 async function generateQR() {
-  const merchantId = document.getElementById("merchant_id").value;
+  const merchantId = merchant_select.value;
+
+  if (!merchantId) {
+    alert("Please select a merchant first");
+    return;
+  }
 
   const res = await fetch(`/admin/merchant/${merchantId}/generate-qr`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      store_name: document.getElementById("store_name").value
+      store_name: store_name.value.trim()
     })
   });
 
-  const data = await res.json();
-  document.getElementById("qr_result").textContent =
-    JSON.stringify(data, null, 2);
+  qr_result.textContent =
+    JSON.stringify(await res.json(), null, 2);
 }
+
+async function loadTransactions() {
+  const res = await fetch("/admin/transactions");
+  const tx = await res.json();
+
+  const table = document.getElementById("tx_table");
+  table.innerHTML = "";
+
+  tx.forEach(t => {
+    const row = document.createElement("tr");
+    row.innerHTML = `
+      <td>${t.phone || ""}</td>
+      <td>${t.amount}</td>
+      <td>${t.verification_fee}</td>
+      <td>${t.status}</td>
+      <td>${new Date(t.created_at).toLocaleString()}</td>
+    `;
+    table.appendChild(row);
+  });
+}
+
+loadMerchants();
+loadTransactions();
 </script>
 
 </body>
