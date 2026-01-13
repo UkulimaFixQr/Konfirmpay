@@ -15,7 +15,7 @@ console.log("🚀 KonfirmPay server starting");
 
 /**
  * ====================================================
- * REQUEST LOGGING (RENDER VISIBILITY)
+ * REQUEST LOGGING (VISIBLE ON RENDER)
  * ====================================================
  */
 app.use((req, res, next) => {
@@ -34,11 +34,20 @@ app.use(express.urlencoded({ extended: false }));
 /**
  * ====================================================
  * STATIC FILES (ADMIN DASHBOARD)
+ * NOTE: FOLDER IS 'Public' WITH CAPITAL P
  * ====================================================
  */
-const PublicPath = path.join(__dirname, "Public");
-console.log("📁 Serving static files from:", PublicPath);
-app.use(express.static(PublicPath));
+const publicPath = path.join(__dirname, "Public");
+console.log("📁 Serving static files from:", publicPath);
+app.use(express.static(publicPath));
+
+/**
+ * Explicit fallback (guarantees /admin.html works)
+ */
+app.get("/admin.html", (req, res) => {
+  console.log("🛠 Explicit admin.html route hit");
+  res.sendFile(path.join(publicPath, "admin.html"));
+});
 
 /**
  * ====================================================
@@ -47,8 +56,8 @@ app.use(express.static(PublicPath));
  */
 const { SUPABASE_URL, SUPABASE_KEY } = process.env;
 
-async function supabase(path, options = {}) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+async function supabase(pathname, options = {}) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${pathname}`, {
     method: options.method || "GET",
     headers: {
       apikey: SUPABASE_KEY,
@@ -60,9 +69,9 @@ async function supabase(path, options = {}) {
   });
 
   if (!res.ok) {
-    const t = await res.text();
-    console.error("❌ Supabase error:", t);
-    throw new Error(t);
+    const text = await res.text();
+    console.error("❌ Supabase error:", text);
+    throw new Error(text);
   }
 
   return res.json();
@@ -79,7 +88,7 @@ app.get("/", (req, res) => {
 
 /**
  * ====================================================
- * ADMIN – REGISTER MERCHANT (REAL)
+ * ADMIN – REGISTER MERCHANT
  * ====================================================
  */
 app.post("/admin/merchant", async (req, res) => {
@@ -105,7 +114,23 @@ app.post("/admin/merchant", async (req, res) => {
 
 /**
  * ====================================================
- * ADMIN – GENERATE IMMUTABLE QR (REAL)
+ * ADMIN – LIST MERCHANTS (FOR DROPDOWN)
+ * ====================================================
+ */
+app.get("/admin/merchants", async (req, res) => {
+  try {
+    const merchants = await supabase(
+      "merchants?status=eq.ACTIVE&order=created_at.desc"
+    );
+    res.json(merchants);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * ====================================================
+ * ADMIN – GENERATE IMMUTABLE QR
  * ====================================================
  */
 app.post("/admin/merchant/:id/generate-qr", async (req, res) => {
@@ -136,7 +161,23 @@ app.post("/admin/merchant/:id/generate-qr", async (req, res) => {
 
 /**
  * ====================================================
- * ERROR HANDLER
+ * ADMIN – LIST TRANSACTIONS
+ * ====================================================
+ */
+app.get("/admin/transactions", async (req, res) => {
+  try {
+    const tx = await supabase(
+      "transactions?order=created_at.desc&limit=50"
+    );
+    res.json(tx);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * ====================================================
+ * GLOBAL ERROR HANDLER
  * ====================================================
  */
 app.use((err, req, res, next) => {
