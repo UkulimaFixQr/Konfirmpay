@@ -7,20 +7,19 @@ const path = require("path");
 
 dotenv.config();
 
-console.log("🔥 KONFIRMPAY INDEX.JS LOADED");
+console.log("🔥 KONFIRMPAY INDEX LOADED");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 /* =========================
-   STATIC FILES
-   (change Public -> public if needed)
+   STATIC FILES (CAPITAL P)
 ========================= */
 app.use(express.static(path.join(__dirname, "Public")));
 
 /* =========================
-   SUPABASE (NO CRASH CHECKS)
+   SUPABASE (NO CRASH GUARDS)
 ========================= */
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -108,14 +107,13 @@ app.post("/mpesa/stkpush", async (req, res) => {
 
 /* =========================
    🔔 M-PESA CALLBACK
+   (DUPLICATE-SAFE)
 ========================= */
 app.post("/mpesa/callback", async (req, res) => {
   try {
     console.log("🔔 CALLBACK RECEIVED");
-    console.log(JSON.stringify(req.body, null, 2));
 
     const callback = req.body?.Body?.stkCallback;
-
     if (!callback) {
       return res.status(400).json({ message: "Invalid callback" });
     }
@@ -135,17 +133,39 @@ app.post("/mpesa/callback", async (req, res) => {
       });
     }
 
+    // ⏳ Ignore interim callbacks (no receipt yet)
+    if (!meta.MpesaReceiptNumber) {
+      console.log("⏳ Interim callback ignored:", CheckoutRequestID);
+      return res.json({ ResultCode: 0, ResultDesc: "Interim accepted" });
+    }
+
+    // 🔁 Deduplicate final callbacks
+    const { data: existing } = await supabase
+      .from("mpesa_callbacks")
+      .select("id")
+      .eq("checkout_request_id", CheckoutRequestID)
+      .not("mpesa_receipt", "is", null)
+      .maybeSingle();
+
+    if (existing) {
+      console.log("⚠️ Duplicate callback ignored:", CheckoutRequestID);
+      return res.json({ ResultCode: 0, ResultDesc: "Duplicate ignored" });
+    }
+
+    // ✅ Save final successful payment
     await supabase.from("mpesa_callbacks").insert({
       merchant_request_id: MerchantRequestID,
       checkout_request_id: CheckoutRequestID,
       result_code: ResultCode,
       result_desc: ResultDesc,
       amount: meta.Amount || null,
-      mpesa_receipt: meta.MpesaReceiptNumber || null,
+      mpesa_receipt: meta.MpesaReceiptNumber,
       phone: meta.PhoneNumber || null,
       transaction_date: meta.TransactionDate || null,
       raw: callback,
     });
+
+    console.log("✅ Payment confirmed:", CheckoutRequestID);
 
     return res.json({ ResultCode: 0, ResultDesc: "Accepted" });
   } catch (err) {
