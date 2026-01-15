@@ -5,109 +5,164 @@
   <meta charset="UTF-8" />
   <style>
     body {
-      font-family: Arial, sans-serif;
-      margin: 40px;
-      background: #f5f5f5;
+      font-family: "Segoe UI", Arial, sans-serif;
+      margin: 0;
+      background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
+      color: #222;
     }
-    h2 { margin-top: 30px; }
-    input, select, button {
-      padding: 8px;
-      margin: 6px 0;
-      width: 340px;
+
+    .lock-screen {
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
+
+    .card {
+      background: white;
+      padding: 30px;
+      width: 360px;
+      border-radius: 12px;
+      box-shadow: 0 15px 40px rgba(0,0,0,.3);
+      text-align: center;
+    }
+
+    .card h2 {
+      margin-bottom: 10px;
+    }
+
+    input {
+      padding: 12px;
+      width: 100%;
+      margin-top: 10px;
+      font-size: 16px;
+      text-align: center;
+      letter-spacing: 5px;
+    }
+
     button {
+      margin-top: 15px;
+      padding: 12px;
+      width: 100%;
+      border: none;
       background: #111;
       color: white;
-      border: none;
+      font-size: 16px;
       cursor: pointer;
+      border-radius: 6px;
     }
+
+    .error {
+      color: red;
+      margin-top: 10px;
+    }
+
+    .dashboard {
+      display: none;
+      padding: 40px;
+      background: #f5f5f5;
+      min-height: 100vh;
+    }
+
     .box {
       background: white;
       padding: 20px;
-      margin-bottom: 30px;
-      border-radius: 5px;
+      border-radius: 8px;
+      margin-bottom: 25px;
     }
-    pre {
-      background: #eee;
-      padding: 10px;
-    }
+
     table {
       width: 100%;
       border-collapse: collapse;
-      background: white;
     }
+
     th, td {
       border: 1px solid #ddd;
       padding: 8px;
       font-size: 14px;
     }
+
     th { background: #eee; }
   </style>
 </head>
 <body>
 
-<h1>KonfirmPay Admin Dashboard</h1>
-
-<!-- REGISTER MERCHANT -->
-<div class="box">
-  <h2>1. Register Merchant</h2>
-
-  <input id="m_name" placeholder="Merchant name" /><br>
-  <input id="m_paybill" placeholder="Paybill" /><br>
-  <input id="m_account_number" placeholder="Account number" /><br>
-
-  <button onclick="registerMerchant()">Register Merchant</button>
-
-  <pre id="merchant_result"></pre>
+<!-- LOCK SCREEN -->
+<div class="lock-screen" id="lock">
+  <div class="card">
+    <h2>🔐 KonfirmPay Admin</h2>
+    <p>Enter Admin PIN</p>
+    <input type="password" id="pin" maxlength="6" />
+    <button onclick="unlock()">Unlock</button>
+    <div class="error" id="err"></div>
+  </div>
 </div>
 
-<!-- GENERATE QR -->
-<div class="box">
-  <h2>2. Generate QR</h2>
+<!-- DASHBOARD -->
+<div class="dashboard" id="dashboard">
+  <h1>KonfirmPay Admin Dashboard</h1>
 
-  <select id="merchant_select">
-    <option value="">-- Select Merchant --</option>
-  </select><br>
+  <div class="box">
+    <h3>Register Merchant</h3>
+    <input id="m_name" placeholder="Merchant name" />
+    <input id="m_paybill" placeholder="Paybill" />
+    <input id="m_account_number" placeholder="Account number" />
+    <button onclick="registerMerchant()">Register</button>
+    <pre id="merchant_result"></pre>
+  </div>
 
-  <input id="store_name" placeholder="Store name (e.g. Main Shop)" /><br>
+  <div class="box">
+    <h3>Generate QR</h3>
+    <select id="merchant_select"></select>
+    <input id="store_name" placeholder="Store name" />
+    <button onclick="generateQR()">Generate QR</button>
+    <pre id="qr_result"></pre>
+  </div>
 
-  <button onclick="generateQR()">Generate QR</button>
-
-  <pre id="qr_result"></pre>
-</div>
-
-<!-- TRANSACTIONS -->
-<div class="box">
-  <h2>3. Recent Transactions</h2>
-  <button onclick="loadTransactions()">Refresh</button><br><br>
-
-  <table>
-    <thead>
-      <tr>
-        <th>Phone</th>
-        <th>Amount</th>
-        <th>Fee</th>
-        <th>Status</th>
-        <th>Date</th>
-      </tr>
-    </thead>
-    <tbody id="tx_table"></tbody>
-  </table>
+  <div class="box">
+    <h3>Recent Transactions</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Phone</th>
+          <th>Amount</th>
+          <th>Fee</th>
+          <th>Status</th>
+          <th>Date</th>
+        </tr>
+      </thead>
+      <tbody id="tx_table"></tbody>
+    </table>
+  </div>
 </div>
 
 <script>
+async function unlock() {
+  const res = await fetch("/admin/verify-pin", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pin: pin.value })
+  });
+
+  if (res.ok) {
+    lock.style.display = "none";
+    dashboard.style.display = "block";
+    loadMerchants();
+    loadTransactions();
+  } else {
+    err.textContent = "Invalid PIN";
+  }
+}
+
 async function loadMerchants() {
   const res = await fetch("/admin/merchants");
   const merchants = await res.json();
-
-  const select = document.getElementById("merchant_select");
-  select.innerHTML = '<option value="">-- Select Merchant --</option>';
-
+  merchant_select.innerHTML = "";
   merchants.forEach(m => {
-    const opt = document.createElement("option");
-    opt.value = m.id;
-    opt.textContent = `${m.name} (Paybill ${m.paybill})`;
-    select.appendChild(opt);
+    const o = document.createElement("option");
+    o.value = m.id;
+    o.textContent = `${m.name} (${m.paybill})`;
+    merchant_select.appendChild(o);
   });
 }
 
@@ -116,60 +171,40 @@ async function registerMerchant() {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      name: m_name.value.trim(),
-      paybill: m_paybill.value.trim(),
-      account_number: m_account_number.value.trim()
+      name: m_name.value,
+      paybill: m_paybill.value,
+      account_number: m_account_number.value
     })
   });
-
-  merchant_result.textContent =
-    JSON.stringify(await res.json(), null, 2);
-
+  merchant_result.textContent = JSON.stringify(await res.json(), null, 2);
   loadMerchants();
 }
 
 async function generateQR() {
-  const merchantId = merchant_select.value;
-
-  if (!merchantId) {
-    alert("Please select a merchant first");
-    return;
-  }
-
-  const res = await fetch(`/admin/merchant/${merchantId}/generate-qr`, {
+  const id = merchant_select.value;
+  const res = await fetch(`/admin/merchant/${id}/generate-qr`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      store_name: store_name.value.trim()
-    })
+    body: JSON.stringify({ store_name: store_name.value })
   });
-
-  qr_result.textContent =
-    JSON.stringify(await res.json(), null, 2);
+  qr_result.textContent = JSON.stringify(await res.json(), null, 2);
 }
 
 async function loadTransactions() {
   const res = await fetch("/admin/transactions");
   const tx = await res.json();
-
-  const table = document.getElementById("tx_table");
-  table.innerHTML = "";
-
+  tx_table.innerHTML = "";
   tx.forEach(t => {
-    const row = document.createElement("tr");
-    row.innerHTML = `
-      <td>${t.phone || ""}</td>
-      <td>${t.amount}</td>
-      <td>${t.verification_fee}</td>
-      <td>${t.status}</td>
-      <td>${new Date(t.created_at).toLocaleString()}</td>
-    `;
-    table.appendChild(row);
+    tx_table.innerHTML += `
+      <tr>
+        <td>${t.phone || ""}</td>
+        <td>${t.amount}</td>
+        <td>${t.verification_fee}</td>
+        <td>${t.status}</td>
+        <td>${new Date(t.created_at).toLocaleString()}</td>
+      </tr>`;
   });
 }
-
-loadMerchants();
-loadTransactions();
 </script>
 
 </body>
