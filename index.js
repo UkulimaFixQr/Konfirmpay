@@ -1,25 +1,21 @@
-import express from "express";
-import cors from "cors";
-import dotenv from "dotenv";
-import axios from "axios";
-import { createClient } from "@supabase/supabase-js";
-import path from "path";
-import { fileURLToPath } from "url";
+const express = require("express");
+const cors = require("cors");
+const dotenv = require("dotenv");
+const axios = require("axios");
+const { createClient } = require("@supabase/supabase-js");
+const path = require("path");
 
 dotenv.config();
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 /* =========================
-   STATIC FILES (CASE-SAFE)
+   STATIC FILES (CASE-SENSITIVE)
 ========================= */
-// 🔴 CHANGE THIS TO MATCH YOUR ACTUAL FOLDER NAME
-app.use(express.static(path.join(__dirname, "Public"))); // or "public"
+// 🔴 CHANGE "Public" TO MATCH YOUR FOLDER EXACTLY
+app.use(express.static(path.join(__dirname, "Public")));
 
 /* =========================
    SUPABASE
@@ -30,28 +26,32 @@ const supabase = createClient(
 );
 
 /* =========================
-   HEALTH
+   HEALTH / HOME
 ========================= */
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "Public", "index.html"));
 });
 
 /* =========================
-   DARAJA TOKEN
+   DARAJA ACCESS TOKEN
 ========================= */
 async function getAccessToken() {
   const auth = Buffer.from(
-    `${process.env.DARAJA_CONSUMER_KEY}:${process.env.DARAJA_CONSUMER_SECRET}`
+    process.env.DARAJA_CONSUMER_KEY +
+      ":" +
+      process.env.DARAJA_CONSUMER_SECRET
   ).toString("base64");
 
-  const { data } = await axios.get(
+  const response = await axios.get(
     `${process.env.DARAJA_BASE_URL}/oauth/v1/generate?grant_type=client_credentials`,
     {
-      headers: { Authorization: `Basic ${auth}` },
+      headers: {
+        Authorization: `Basic ${auth}`,
+      },
     }
   );
 
-  return data.access_token;
+  return response.data.access_token;
 }
 
 /* =========================
@@ -74,7 +74,7 @@ app.post("/mpesa/stkpush", async (req, res) => {
 
     const token = await getAccessToken();
 
-    const response = await axios.post(
+    const stk = await axios.post(
       `${process.env.DARAJA_BASE_URL}/mpesa/stkpush/v1/processrequest`,
       {
         BusinessShortCode: process.env.DARAJA_SHORTCODE,
@@ -90,20 +90,22 @@ app.post("/mpesa/stkpush", async (req, res) => {
         TransactionDesc: "KonfirmPay Payment",
       },
       {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
       }
     );
 
-    console.log("📤 STK PUSH:", response.data);
-    res.json(response.data);
+    console.log("📤 STK PUSH SENT:", stk.data);
+    res.json(stk.data);
   } catch (err) {
     console.error("❌ STK ERROR:", err.response?.data || err.message);
-    res.status(500).json({ error: "STK failed" });
+    res.status(500).json({ error: "STK push failed" });
   }
 });
 
 /* =========================
-   🔔 CALLBACK
+   🔔 M-PESA CALLBACK
 ========================= */
 app.post("/mpesa/callback", async (req, res) => {
   try {
@@ -125,7 +127,9 @@ app.post("/mpesa/callback", async (req, res) => {
 
     let meta = {};
     if (CallbackMetadata?.Item) {
-      CallbackMetadata.Item.forEach(i => (meta[i.Name] = i.Value));
+      CallbackMetadata.Item.forEach((i) => {
+        meta[i.Name] = i.Value;
+      });
     }
 
     await supabase.from("mpesa_callbacks").insert({
@@ -148,9 +152,9 @@ app.post("/mpesa/callback", async (req, res) => {
 });
 
 /* =========================
-   START
+   START SERVER
 ========================= */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`🚀 KonfirmPay live on port ${PORT}`);
+  console.log(`🚀 KonfirmPay running on port ${PORT}`);
 });
