@@ -7,7 +7,7 @@ const path = require("path");
 
 dotenv.config();
 
-console.log("🔥 KONFIRMPAY INDEX LOADED");
+console.log("🔥 KONFIRMPAY INDEX.JS LOADED");
 
 const app = express();
 app.use(cors());
@@ -19,7 +19,7 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, "Public")));
 
 /* =========================
-   SUPABASE (NO CRASH GUARDS)
+   SUPABASE
 ========================= */
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -46,21 +46,24 @@ async function getAccessToken() {
   const response = await axios.get(
     `${process.env.DARAJA_BASE_URL}/oauth/v1/generate?grant_type=client_credentials`,
     {
-      headers: {
-        Authorization: `Basic ${auth}`,
-      },
+      headers: { Authorization: `Basic ${auth}` },
     }
   );
 
   return response.data.access_token;
 }
 
-/* =========================
-   STK PUSH
-========================= */
+/* =====================================================
+   STK PUSH (SAME PAYBILL, MERCHANT IDENTIFIED VIA QR)
+   Money goes to Paybill — we only record entitlement
+===================================================== */
 app.post("/mpesa/stkpush", async (req, res) => {
   try {
-    const { phone, amount } = req.body;
+    const { phone, amount, merchant_id } = req.body;
+
+    if (!phone || !amount || !merchant_id) {
+      return res.status(400).json({ error: "phone, amount, merchant_id required" });
+    }
 
     const timestamp = new Date()
       .toISOString()
@@ -75,7 +78,7 @@ app.post("/mpesa/stkpush", async (req, res) => {
 
     const token = await getAccessToken();
 
-    const response = await axios.post(
+    const stkResponse = await axios.post(
       `${process.env.DARAJA_BASE_URL}/mpesa/stkpush/v1/processrequest`,
       {
         BusinessShortCode: process.env.DARAJA_SHORTCODE,
@@ -87,28 +90,36 @@ app.post("/mpesa/stkpush", async (req, res) => {
         PartyB: process.env.DARAJA_SHORTCODE,
         PhoneNumber: phone,
         CallBackURL: "https://konfirmpay.onrender.com/mpesa/callback",
-        AccountReference: "KonfirmPay",
+        AccountReference: merchant_id, // 🔑 binds payment to merchant
         TransactionDesc: "KonfirmPay Payment",
       },
       {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { Authorization: `Bearer ${token}` },
       }
     );
 
-    console.log("📤 STK PUSH SENT:", response.data);
-    res.json(response.data);
+    // Save STK request for later callback matching
+    await supabase.from("stk_requests").insert({
+      checkout_request_id: stkResponse.data.CheckoutRequestID,
+      merchant_id,
+      amount,
+      phone,
+      status: "PENDING",
+    });
+
+    res.json(stkResponse.data);
   } catch (err) {
     console.error("❌ STK ERROR:", err.response?.data || err.message);
     res.status(500).json({ error: "STK push failed" });
   }
 });
 
-/* =========================
+/* =====================================================
    🔔 M-PESA CALLBACK
-   (DUPLICATE-SAFE)
-========================= */
+   - Ignores interim callbacks
+   - Deduplicates final callbacks
+   - Credits merchant ledger (NO MONEY HELD)
+===================================================== */
 app.post("/mpesa/callback", async (req, res) => {
   try {
     console.log("🔔 CALLBACK RECEIVED");
@@ -119,7 +130,6 @@ app.post("/mpesa/callback", async (req, res) => {
     }
 
     const {
-      MerchantRequestID,
       CheckoutRequestID,
       ResultCode,
       ResultDesc,
@@ -128,44 +138,57 @@ app.post("/mpesa/callback", async (req, res) => {
 
     let meta = {};
     if (CallbackMetadata?.Item) {
-      CallbackMetadata.Item.forEach((i) => {
+      CallbackMetadata.Item.forEach(i => {
         meta[i.Name] = i.Value;
       });
     }
 
-    // ⏳ Ignore interim callbacks (no receipt yet)
+    // ⏳ Ignore interim callbacks (PIN entered)
     if (!meta.MpesaReceiptNumber) {
-      console.log("⏳ Interim callback ignored:", CheckoutRequestID);
+      console.log("⏳ Interim callback:", CheckoutRequestID);
       return res.json({ ResultCode: 0, ResultDesc: "Interim accepted" });
     }
 
     // 🔁 Deduplicate final callbacks
-    const { data: existing } = await supabase
-      .from("mpesa_callbacks")
+    const { data: alreadyProcessed } = await supabase
+      .from("transactions")
       .select("id")
       .eq("checkout_request_id", CheckoutRequestID)
-      .not("mpesa_receipt", "is", null)
       .maybeSingle();
 
-    if (existing) {
+    if (alreadyProcessed) {
       console.log("⚠️ Duplicate callback ignored:", CheckoutRequestID);
       return res.json({ ResultCode: 0, ResultDesc: "Duplicate ignored" });
     }
 
-    // ✅ Save final successful payment
-    await supabase.from("mpesa_callbacks").insert({
-      merchant_request_id: MerchantRequestID,
+    // 🔍 Get original STK request
+    const { data: stk } = await supabase
+      .from("stk_requests")
+      .select("merchant_id, amount")
+      .eq("checkout_request_id", CheckoutRequestID)
+      .single();
+
+    if (!stk) {
+      console.error("❌ STK request not found:", CheckoutRequestID);
+      return res.status(400).json({ error: "Unknown transaction" });
+    }
+
+    // ✅ Record merchant entitlement (ledger entry)
+    await supabase.from("transactions").insert({
+      merchant_id: stk.merchant_id,
       checkout_request_id: CheckoutRequestID,
-      result_code: ResultCode,
-      result_desc: ResultDesc,
-      amount: meta.Amount || null,
       mpesa_receipt: meta.MpesaReceiptNumber,
-      phone: meta.PhoneNumber || null,
-      transaction_date: meta.TransactionDate || null,
-      raw: callback,
+      amount: stk.amount,
+      status: "PAID",
     });
 
-    console.log("✅ Payment confirmed:", CheckoutRequestID);
+    // Update STK request status
+    await supabase
+      .from("stk_requests")
+      .update({ status: "PAID" })
+      .eq("checkout_request_id", CheckoutRequestID);
+
+    console.log("✅ Merchant credited (ledger):", stk.merchant_id);
 
     return res.json({ ResultCode: 0, ResultDesc: "Accepted" });
   } catch (err) {
