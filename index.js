@@ -1,3 +1,5 @@
+console.log("🔥 KONFIRMPAY INDEX.JS LOADED");
+
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
@@ -10,6 +12,10 @@ dotenv.config();
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.post("/mpesa/callback", (req, res) => {
+  return res.json({ ok: true, message: "CALLBACK ROUTE HIT" });
+});
+
 
 /* =========================
    STATIC FILES (CASE-SENSITIVE)
