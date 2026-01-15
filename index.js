@@ -6,52 +6,62 @@ const fetch = (...args) =>
 
 const app = express();
 
-/**
- * ====================================================
- * STARTUP LOG
- * ====================================================
- */
-console.log("🚀 KonfirmPay server starting");
+/* ====================================================
+   CONFIG
+==================================================== */
+const { SUPABASE_URL, SUPABASE_KEY, ADMIN_PIN } = process.env;
 
-/**
- * ====================================================
- * REQUEST LOGGING (RENDER VISIBILITY)
- * ====================================================
- */
+/* ====================================================
+   LOGGING
+==================================================== */
+console.log("🚀 KonfirmPay server starting");
 app.use((req, res, next) => {
   console.log(`➡️  ${req.method} ${req.url}`);
   next();
 });
 
-/**
- * ====================================================
- * BODY PARSERS
- * ====================================================
- */
+/* ====================================================
+   MIDDLEWARE
+==================================================== */
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
-/**
- * ====================================================
- * STATIC FILES (ADMIN DASHBOARD)
- * NOTE: Folder is 'Public' (capital P)
- * ====================================================
- */
+/* ====================================================
+   STATIC FILES (Public folder – capital P)
+==================================================== */
 const publicPath = path.join(__dirname, "Public");
-console.log("📁 Serving static files from:", publicPath);
 app.use(express.static(publicPath));
 
 app.get("/admin.html", (req, res) => {
   res.sendFile(path.join(publicPath, "admin.html"));
 });
 
-/**
- * ====================================================
- * SUPABASE REST CLIENT
- * ====================================================
- */
-const { SUPABASE_URL, SUPABASE_KEY } = process.env;
+/* ====================================================
+   SIMPLE PIN HASH
+==================================================== */
+function hashPin(pin) {
+  return crypto.createHash("sha256").update(pin).digest("hex");
+}
 
+const ADMIN_PIN_HASH = hashPin(ADMIN_PIN);
+
+/* ====================================================
+   ADMIN PIN VERIFY ENDPOINT
+==================================================== */
+app.post("/admin/verify-pin", (req, res) => {
+  const { pin } = req.body;
+  if (!pin) return res.status(400).json({ error: "PIN required" });
+
+  if (hashPin(pin) === ADMIN_PIN_HASH) {
+    return res.json({ success: true });
+  }
+
+  res.status(401).json({ error: "Invalid PIN" });
+});
+
+/* ====================================================
+   SUPABASE CLIENT
+==================================================== */
 async function supabase(pathname, options = {}) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${pathname}`, {
     method: options.method || "GET",
@@ -66,46 +76,33 @@ async function supabase(pathname, options = {}) {
 
   if (!res.ok) {
     const text = await res.text();
-    console.error("❌ Supabase error:", text);
     throw new Error(text);
   }
-
   return res.json();
 }
 
-/**
- * ====================================================
- * HEALTH CHECK
- * ====================================================
- */
-app.get("/", (req, res) => {
+/* ====================================================
+   HEALTH
+==================================================== */
+app.get("/", (_, res) => {
   res.send("KonfirmPay backend is running");
 });
 
-/**
- * ====================================================
- * ADMIN – REGISTER MERCHANT
- * ====================================================
- */
+/* ====================================================
+   ADMIN – REGISTER MERCHANT
+==================================================== */
 app.post("/admin/merchant", async (req, res) => {
   try {
-    console.log("🧑‍💼 Register merchant:", req.body);
-
     const { name, paybill, account_number } = req.body;
-
     if (!name || !paybill || !account_number) {
-      return res.status(400).json({ error: "Missing merchant fields" });
+      return res.status(400).json({ error: "Missing fields" });
     }
 
-    // Prevent duplicate merchant by paybill
     const existing = await supabase(
       `merchants?paybill=eq.${paybill}`
     );
-
-    if (existing.length > 0) {
-      return res.status(400).json({
-        error: "Merchant with this paybill already exists"
-      });
+    if (existing.length) {
+      return res.status(400).json({ error: "Merchant already exists" });
     }
 
     const merchant = await supabase("merchants", {
@@ -120,36 +117,30 @@ app.post("/admin/merchant", async (req, res) => {
     });
 
     res.json(merchant[0]);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
-/**
- * ====================================================
- * ADMIN – LIST MERCHANTS (FOR DROPDOWN)
- * ====================================================
- */
-app.get("/admin/merchants", async (req, res) => {
+/* ====================================================
+   ADMIN – LIST MERCHANTS
+==================================================== */
+app.get("/admin/merchants", async (_, res) => {
   try {
     const merchants = await supabase(
       "merchants?status=eq.ACTIVE&order=created_at.desc"
     );
     res.json(merchants);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
-/**
- * ====================================================
- * ADMIN – GENERATE IMMUTABLE QR
- * ====================================================
- */
+/* ====================================================
+   ADMIN – GENERATE QR
+==================================================== */
 app.post("/admin/merchant/:id/generate-qr", async (req, res) => {
   try {
-    console.log("📦 Generate QR for merchant:", req.params.id);
-
     const qrToken =
       "KPQR_" + crypto.randomBytes(4).toString("hex").toUpperCase();
 
@@ -167,42 +158,28 @@ app.post("/admin/merchant/:id/generate-qr", async (req, res) => {
       qr_token: qr[0].qr_token,
       ussd_code: `*384*${qr[0].qr_token}#`
     });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
-/**
- * ====================================================
- * ADMIN – LIST TRANSACTIONS
- * ====================================================
- */
-app.get("/admin/transactions", async (req, res) => {
+/* ====================================================
+   ADMIN – TRANSACTIONS
+==================================================== */
+app.get("/admin/transactions", async (_, res) => {
   try {
     const tx = await supabase(
       "transactions?order=created_at.desc&limit=50"
     );
     res.json(tx);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
-/**
- * ====================================================
- * GLOBAL ERROR HANDLER
- * ====================================================
- */
-app.use((err, req, res, next) => {
-  console.error("🔥 UNHANDLED ERROR:", err);
-  res.status(500).send("Internal Server Error");
-});
-
-/**
- * ====================================================
- * START SERVER
- * ====================================================
- */
+/* ====================================================
+   START SERVER
+==================================================== */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🟢 KonfirmPay running on port ${PORT}`);
