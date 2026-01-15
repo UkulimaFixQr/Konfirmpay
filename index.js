@@ -1,5 +1,3 @@
-console.log("🔥 KONFIRMPAY INDEX.JS LOADED");
-
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
@@ -9,21 +7,20 @@ const path = require("path");
 
 dotenv.config();
 
+console.log("🔥 KONFIRMPAY INDEX.JS LOADED");
+
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.post("/mpesa/callback", (req, res) => {
-  return res.json({ ok: true, message: "CALLBACK ROUTE HIT" });
-});
-
 
 /* =========================
-   STATIC FILES (CASE-SENSITIVE)
+   STATIC FILES
+   (change Public -> public if needed)
 ========================= */
-app.use(express.static(path.join(__dirname, "Public"))); // or "public"
+app.use(express.static(path.join(__dirname, "Public")));
 
 /* =========================
-   SUPABASE
+   SUPABASE (NO CRASH CHECKS)
 ========================= */
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -31,25 +28,28 @@ const supabase = createClient(
 );
 
 /* =========================
-   HOME
+   HEALTH CHECK
 ========================= */
 app.get("/", (req, res) => {
   res.send("KonfirmPay backend running");
 });
 
 /* =========================
-   DARAJA TOKEN
+   DARAJA ACCESS TOKEN
 ========================= */
 async function getAccessToken() {
   const auth = Buffer.from(
-    process.env.DARAJA_CONSUMER_KEY + ":" +
-    process.env.DARAJA_CONSUMER_SECRET
+    process.env.DARAJA_CONSUMER_KEY +
+      ":" +
+      process.env.DARAJA_CONSUMER_SECRET
   ).toString("base64");
 
   const response = await axios.get(
     `${process.env.DARAJA_BASE_URL}/oauth/v1/generate?grant_type=client_credentials`,
     {
-      headers: { Authorization: `Basic ${auth}` }
+      headers: {
+        Authorization: `Basic ${auth}`,
+      },
     }
   );
 
@@ -70,8 +70,8 @@ app.post("/mpesa/stkpush", async (req, res) => {
 
     const password = Buffer.from(
       process.env.DARAJA_SHORTCODE +
-      process.env.DARAJA_PASSKEY +
-      timestamp
+        process.env.DARAJA_PASSKEY +
+        timestamp
     ).toString("base64");
 
     const token = await getAccessToken();
@@ -89,37 +89,75 @@ app.post("/mpesa/stkpush", async (req, res) => {
         PhoneNumber: phone,
         CallBackURL: "https://konfirmpay.onrender.com/mpesa/callback",
         AccountReference: "KonfirmPay",
-        TransactionDesc: "KonfirmPay Payment"
+        TransactionDesc: "KonfirmPay Payment",
       },
       {
-        headers: { Authorization: `Bearer ${token}` }
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
       }
     );
 
+    console.log("📤 STK PUSH SENT:", response.data);
     res.json(response.data);
-  } catch (e) {
-    console.error("STK ERROR:", e.response?.data || e.message);
-    res.status(500).json({ error: "STK failed" });
+  } catch (err) {
+    console.error("❌ STK ERROR:", err.response?.data || err.message);
+    res.status(500).json({ error: "STK push failed" });
   }
 });
 
 /* =========================
-   CALLBACK
+   🔔 M-PESA CALLBACK
 ========================= */
 app.post("/mpesa/callback", async (req, res) => {
   try {
-    console.log("CALLBACK:", JSON.stringify(req.body, null, 2));
+    console.log("🔔 CALLBACK RECEIVED");
+    console.log(JSON.stringify(req.body, null, 2));
+
+    const callback = req.body?.Body?.stkCallback;
+
+    if (!callback) {
+      return res.status(400).json({ message: "Invalid callback" });
+    }
+
+    const {
+      MerchantRequestID,
+      CheckoutRequestID,
+      ResultCode,
+      ResultDesc,
+      CallbackMetadata,
+    } = callback;
+
+    let meta = {};
+    if (CallbackMetadata?.Item) {
+      CallbackMetadata.Item.forEach((i) => {
+        meta[i.Name] = i.Value;
+      });
+    }
+
+    await supabase.from("mpesa_callbacks").insert({
+      merchant_request_id: MerchantRequestID,
+      checkout_request_id: CheckoutRequestID,
+      result_code: ResultCode,
+      result_desc: ResultDesc,
+      amount: meta.Amount || null,
+      mpesa_receipt: meta.MpesaReceiptNumber || null,
+      phone: meta.PhoneNumber || null,
+      transaction_date: meta.TransactionDate || null,
+      raw: callback,
+    });
+
     return res.json({ ResultCode: 0, ResultDesc: "Accepted" });
-  } catch (e) {
-    console.error("CALLBACK ERROR:", e);
-    res.status(500).json({ error: "Server error" });
+  } catch (err) {
+    console.error("🔥 CALLBACK ERROR:", err);
+    return res.status(500).json({ error: "Server error" });
   }
 });
 
 /* =========================
-   START
+   START SERVER
 ========================= */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`KonfirmPay running on port ${PORT}`);
+  console.log(`🚀 KonfirmPay running on port ${PORT}`);
 });
