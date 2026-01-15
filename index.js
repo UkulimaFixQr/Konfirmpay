@@ -98,12 +98,17 @@ app.post("/admin/merchant", async (req, res) => {
       return res.status(400).json({ error: "Missing fields" });
     }
 
-    const existing = await supabase(
-      `merchants?paybill=eq.${paybill}`
-    );
-    if (existing.length) {
-      return res.status(400).json({ error: "Merchant already exists" });
-    }
+    // Prevent duplicate merchant by paybill + account_number
+const existing = await supabase(
+  `merchants?paybill=eq.${paybill}&account_number=eq.${account_number}`
+);
+
+if (existing.length > 0) {
+  return res.status(400).json({
+    error: "Merchant with this paybill AND account number already exists"
+  });
+}
+
 
     const merchant = await supabase("merchants", {
       method: "POST",
