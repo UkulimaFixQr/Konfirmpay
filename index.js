@@ -1,191 +1,156 @@
-const express = require("express");
-const path = require("path");
-const crypto = require("crypto");
-const fetch = (...args) =>
-  import("node-fetch").then(({ default: fetch }) => fetch(...args));
+import express from "express";
+import cors from "cors";
+import dotenv from "dotenv";
+import axios from "axios";
+import { createClient } from "@supabase/supabase-js";
+import path from "path";
+import { fileURLToPath } from "url";
+
+dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
-
-/* ====================================================
-   CONFIG
-==================================================== */
-const { SUPABASE_URL, SUPABASE_KEY, ADMIN_PIN } = process.env;
-
-/* ====================================================
-   LOGGING
-==================================================== */
-console.log("🚀 KonfirmPay server starting");
-app.use((req, res, next) => {
-  console.log(`➡️  ${req.method} ${req.url}`);
-  next();
-});
-
-/* ====================================================
-   MIDDLEWARE
-==================================================== */
+app.use(cors());
 app.use(express.json());
-app.use(express.urlencoded({ extended: false }));
 
-/* ====================================================
-   STATIC FILES (Public folder – capital P)
-==================================================== */
-const publicPath = path.join(__dirname, "Public");
-app.use(express.static(publicPath));
+/* =========================
+   STATIC FILES (CASE-SAFE)
+========================= */
+// 🔴 CHANGE THIS TO MATCH YOUR ACTUAL FOLDER NAME
+app.use(express.static(path.join(__dirname, "Public"))); // or "public"
 
-app.get("/admin.html", (req, res) => {
-  res.sendFile(path.join(publicPath, "admin.html"));
-});
-
-/* ====================================================
-   SIMPLE PIN HASH
-==================================================== */
-function hashPin(pin) {
-  return crypto.createHash("sha256").update(pin).digest("hex");
-}
-
-const ADMIN_PIN_HASH = hashPin(ADMIN_PIN);
-
-/* ====================================================
-   ADMIN PIN VERIFY ENDPOINT
-==================================================== */
-app.post("/admin/verify-pin", (req, res) => {
-  const { pin } = req.body;
-  if (!pin) return res.status(400).json({ error: "PIN required" });
-
-  if (hashPin(pin) === ADMIN_PIN_HASH) {
-    return res.json({ success: true });
-  }
-
-  res.status(401).json({ error: "Invalid PIN" });
-});
-
-/* ====================================================
-   SUPABASE CLIENT
-==================================================== */
-async function supabase(pathname, options = {}) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${pathname}`, {
-    method: options.method || "GET",
-    headers: {
-      apikey: SUPABASE_KEY,
-      Authorization: `Bearer ${SUPABASE_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "return=representation"
-    },
-    body: options.body ? JSON.stringify(options.body) : undefined
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text);
-  }
-  return res.json();
-}
-
-/* ====================================================
-   HEALTH
-==================================================== */
-app.get("/", (_, res) => {
-  res.send("KonfirmPay backend is running");
-});
-
-/* ====================================================
-   ADMIN – REGISTER MERCHANT
-==================================================== */
-app.post("/admin/merchant", async (req, res) => {
-  try {
-    const { name, paybill, account_number } = req.body;
-    if (!name || !paybill || !account_number) {
-      return res.status(400).json({ error: "Missing fields" });
-    }
-
-    // Prevent duplicate merchant by paybill + account_number
-const existing = await supabase(
-  `merchants?paybill=eq.${paybill}&account_number=eq.${account_number}`
+/* =========================
+   SUPABASE
+========================= */
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-if (existing.length > 0) {
-  return res.status(400).json({
-    error: "Merchant with this paybill AND account number already exists"
-  });
+/* =========================
+   HEALTH
+========================= */
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "Public", "index.html"));
+});
+
+/* =========================
+   DARAJA TOKEN
+========================= */
+async function getAccessToken() {
+  const auth = Buffer.from(
+    `${process.env.DARAJA_CONSUMER_KEY}:${process.env.DARAJA_CONSUMER_SECRET}`
+  ).toString("base64");
+
+  const { data } = await axios.get(
+    `${process.env.DARAJA_BASE_URL}/oauth/v1/generate?grant_type=client_credentials`,
+    {
+      headers: { Authorization: `Basic ${auth}` },
+    }
+  );
+
+  return data.access_token;
 }
 
+/* =========================
+   STK PUSH
+========================= */
+app.post("/mpesa/stkpush", async (req, res) => {
+  try {
+    const { phone, amount, accountReference } = req.body;
 
-    const merchant = await supabase("merchants", {
-      method: "POST",
-      body: {
-        name,
-        paybill,
-        account_number,
-        is_chain: false,
-        status: "ACTIVE"
+    const timestamp = new Date()
+      .toISOString()
+      .replace(/[^0-9]/g, "")
+      .slice(0, 14);
+
+    const password = Buffer.from(
+      process.env.DARAJA_SHORTCODE +
+        process.env.DARAJA_PASSKEY +
+        timestamp
+    ).toString("base64");
+
+    const token = await getAccessToken();
+
+    const response = await axios.post(
+      `${process.env.DARAJA_BASE_URL}/mpesa/stkpush/v1/processrequest`,
+      {
+        BusinessShortCode: process.env.DARAJA_SHORTCODE,
+        Password: password,
+        Timestamp: timestamp,
+        TransactionType: "CustomerPayBillOnline",
+        Amount: amount,
+        PartyA: phone,
+        PartyB: process.env.DARAJA_SHORTCODE,
+        PhoneNumber: phone,
+        CallBackURL: "https://konfirmpay.onrender.com/mpesa/callback",
+        AccountReference: accountReference || "KonfirmPay",
+        TransactionDesc: "KonfirmPay Payment",
+      },
+      {
+        headers: { Authorization: `Bearer ${token}` },
       }
-    });
-
-    res.json(merchant[0]);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-/* ====================================================
-   ADMIN – LIST MERCHANTS
-==================================================== */
-app.get("/admin/merchants", async (_, res) => {
-  try {
-    const merchants = await supabase(
-      "merchants?status=eq.ACTIVE&order=created_at.desc"
     );
-    res.json(merchants);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+
+    console.log("📤 STK PUSH:", response.data);
+    res.json(response.data);
+  } catch (err) {
+    console.error("❌ STK ERROR:", err.response?.data || err.message);
+    res.status(500).json({ error: "STK failed" });
   }
 });
 
-/* ====================================================
-   ADMIN – GENERATE QR
-==================================================== */
-app.post("/admin/merchant/:id/generate-qr", async (req, res) => {
+/* =========================
+   🔔 CALLBACK
+========================= */
+app.post("/mpesa/callback", async (req, res) => {
   try {
-    const qrToken =
-      "KPQR_" + crypto.randomBytes(4).toString("hex").toUpperCase();
+    console.log("🔔 CALLBACK RECEIVED");
+    console.log(JSON.stringify(req.body, null, 2));
 
-    const qr = await supabase("merchant_qrs", {
-      method: "POST",
-      body: {
-        merchant_id: req.params.id,
-        qr_token: qrToken,
-        store_name: req.body.store_name,
-        status: "ACTIVE"
-      }
+    const callback = req.body?.Body?.stkCallback;
+    if (!callback) {
+      return res.status(400).json({ message: "Invalid callback" });
+    }
+
+    const {
+      MerchantRequestID,
+      CheckoutRequestID,
+      ResultCode,
+      ResultDesc,
+      CallbackMetadata,
+    } = callback;
+
+    let meta = {};
+    if (CallbackMetadata?.Item) {
+      CallbackMetadata.Item.forEach(i => (meta[i.Name] = i.Value));
+    }
+
+    await supabase.from("mpesa_callbacks").insert({
+      merchant_request_id: MerchantRequestID,
+      checkout_request_id: CheckoutRequestID,
+      result_code: ResultCode,
+      result_desc: ResultDesc,
+      amount: meta.Amount || null,
+      mpesa_receipt: meta.MpesaReceiptNumber || null,
+      phone: meta.PhoneNumber || null,
+      transaction_date: meta.TransactionDate || null,
+      raw: callback,
     });
 
-    res.json({
-      qr_token: qr[0].qr_token,
-      ussd_code: `*384*${qr[0].qr_token}#`
-    });
+    return res.json({ ResultCode: 0, ResultDesc: "Accepted" });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    console.error("🔥 CALLBACK ERROR:", e);
+    return res.status(500).json({ error: "Server error" });
   }
 });
 
-/* ====================================================
-   ADMIN – TRANSACTIONS
-==================================================== */
-app.get("/admin/transactions", async (_, res) => {
-  try {
-    const tx = await supabase(
-      "transactions?order=created_at.desc&limit=50"
-    );
-    res.json(tx);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-/* ====================================================
-   START SERVER
-==================================================== */
-const PORT = process.env.PORT || 3000;
+/* =========================
+   START
+========================= */
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`🟢 KonfirmPay running on port ${PORT}`);
+  console.log(`🚀 KonfirmPay live on port ${PORT}`);
 });
