@@ -1,336 +1,89 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-  <meta charset="UTF-8" />
   <title>KonfirmPay Admin</title>
-
+  <meta charset="UTF-8" />
   <style>
-    * { box-sizing: border-box; }
-
-    body {
-      margin: 0;
-      font-family: "Segoe UI", system-ui, sans-serif;
-      background: #f3f5f7;
-      color: #222;
-    }
-
-    /* ---------- LOCK SCREEN ---------- */
-    .lock {
-      height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
-    }
-
-    .card {
-      background: white;
-      padding: 32px;
-      width: 360px;
-      border-radius: 12px;
-      box-shadow: 0 20px 50px rgba(0,0,0,.35);
-      text-align: center;
-    }
-
-    .card h2 { margin-bottom: 8px; }
-    .card p { color: #555; }
-
-    input, select {
-      width: 100%;
-      padding: 12px;
-      margin-top: 12px;
-      font-size: 15px;
-      border-radius: 6px;
-      border: 1px solid #ccc;
-    }
-
-    #pin {
-      letter-spacing: 6px;
-      text-align: center;
-      font-size: 18px;
-    }
-
-    button {
-      width: 100%;
-      margin-top: 15px;
-      padding: 12px;
-      background: #111;
-      color: white;
-      border: none;
-      border-radius: 6px;
-      font-size: 15px;
-      cursor: pointer;
-    }
-
-    .error { color: red; margin-top: 10px; }
-
-    /* ---------- DASHBOARD ---------- */
-    .dashboard {
-      display: none;
-      padding: 30px;
-    }
-
-    .container {
-      max-width: 1200px;
-      margin: auto;
-    }
-
-    header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 30px;
-    }
-
-    header h1 { margin: 0; }
-
-    nav {
-      display: flex;
-      gap: 15px;
-      margin-bottom: 25px;
-    }
-
-    nav button {
-      background: #e4e6eb;
-      color: #333;
-      width: auto;
-      padding: 10px 18px;
-      border-radius: 20px;
-      font-weight: 500;
-    }
-
-    nav button.active {
-      background: #111;
-      color: white;
-    }
-
-    .tab { display: none; }
-    .tab.active { display: block; }
-
-    .box {
-      background: white;
-      padding: 25px;
-      border-radius: 10px;
-      margin-bottom: 25px;
-    }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      margin-top: 15px;
-    }
-
-    th, td {
-      padding: 10px;
-      border-bottom: 1px solid #ddd;
-      font-size: 14px;
-    }
-
-    th {
-      background: #f1f1f1;
-      text-align: left;
-    }
-
-    .muted { color: #666; font-size: 13px; }
+    body { font-family: Arial; background:#f5f5f5; margin:0 }
+    .lock, .dash { height:100vh; display:flex; align-items:center; justify-content:center }
+    .card { background:white; padding:30px; width:360px; border-radius:10px }
+    .dash { display:none; padding:20px; align-items:flex-start }
+    h2 { margin-top:0 }
+    button { padding:10px; width:100%; margin-top:10px }
+    table { width:100%; border-collapse:collapse; margin-top:20px }
+    th, td { border:1px solid #ccc; padding:8px }
+    .cards { display:grid; grid-template-columns:repeat(3,1fr); gap:15px }
+    .cardbox { background:white; padding:15px; border-radius:8px }
   </style>
 </head>
-
 <body>
 
-<!-- 🔐 LOCK SCREEN -->
 <div class="lock" id="lock">
   <div class="card">
-    <h2>🔐 KonfirmPay Admin</h2>
-    <p>Enter Admin PIN</p>
-    <input type="password" id="pin" maxlength="6" />
-    <button onclick="unlock()">Unlock</button>
-    <div class="error" id="err"></div>
+    <h2>Admin Login</h2>
+    <input id="pin" type="password" placeholder="PIN" />
+    <button onclick="login()">Login</button>
+    <p id="err"></p>
   </div>
 </div>
 
-<!-- 📊 DASHBOARD -->
-<div class="dashboard" id="dashboard">
-  <div class="container">
+<div class="dash" id="dash">
+  <div style="width:100%">
+    <h2>KonfirmPay Revenue</h2>
 
-    <header>
-      <h1>KonfirmPay Admin</h1>
-      <button onclick="logout()">Logout</button>
-    </header>
-
-    <nav>
-      <button class="active" onclick="openTab('merchants')">Merchants</button>
-      <button onclick="openTab('qr')">QR Codes</button>
-      <button onclick="openTab('tx')">Transactions</button>
-    </nav>
-
-    <!-- 👤 MERCHANTS -->
-    <div class="tab active" id="tab-merchants">
-      <div class="box">
-        <h3>Register Merchant</h3>
-        <input id="m_name" placeholder="Merchant name" />
-        <input id="m_paybill" placeholder="Paybill" />
-        <input id="m_account_number" placeholder="Account number" />
-        <button onclick="registerMerchant()">Register</button>
-      </div>
-
-      <div class="box">
-        <h3>All Merchants</h3>
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Paybill</th>
-              <th>Created</th>
-            </tr>
-          </thead>
-          <tbody id="merchant_table"></tbody>
-        </table>
-      </div>
+    <div class="cards">
+      <div class="cardbox"><b>Total Revenue</b><br><span id="total"></span></div>
+      <div class="cardbox"><b>Today</b><br><span id="today"></span></div>
+      <div class="cardbox"><b>Paid Verifications</b><br><span id="count"></span></div>
     </div>
 
-    <!-- 📦 QR -->
-    <div class="tab" id="tab-qr">
-      <div class="box">
-        <h3>Generate QR</h3>
-        <select id="merchant_select"></select>
-        <input id="store_name" placeholder="Store name" />
-        <button onclick="generateQR()">Generate QR</button>
-        <pre id="qr_result" class="muted"></pre>
-      </div>
-    </div>
-
-    <!-- 💰 TRANSACTIONS -->
-    <div class="tab" id="tab-tx">
-      <div class="box">
-        <h3>Recent Transactions</h3>
-        <table>
-          <thead>
-            <tr>
-              <th>Merchant</th>
-              <th>Amount</th>
-              <th>Status</th>
-              <th>Date</th>
-            </tr>
-          </thead>
-          <tbody id="tx_table"></tbody>
-        </table>
-      </div>
-    </div>
-
+    <h3>Verification Logs</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Phone</th>
+          <th>Amount</th>
+          <th>Fee</th>
+          <th>Date</th>
+        </tr>
+      </thead>
+      <tbody id="logs"></tbody>
+    </table>
   </div>
 </div>
 
 <script>
-/* ---------- AUTH ---------- */
-if (sessionStorage.getItem("admin")) {
-  lock.style.display = "none";
-  dashboard.style.display = "block";
-  init();
-}
-
-async function unlock() {
+async function login() {
   const res = await fetch("/admin/verify-pin", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ pin: pin.value })
+    method:"POST",
+    headers:{ "Content-Type":"application/json" },
+    body:JSON.stringify({ pin: pin.value })
   });
 
   if (res.ok) {
-    sessionStorage.setItem("admin", "true");
-    lock.style.display = "none";
-    dashboard.style.display = "block";
-    init();
+    lock.style.display="none";
+    dash.style.display="flex";
+    loadRevenue();
   } else {
-    err.textContent = "Invalid PIN";
+    err.textContent="Invalid PIN";
   }
 }
 
-function logout() {
-  sessionStorage.clear();
-  location.reload();
-}
+async function loadRevenue() {
+  const summary = await (await fetch("/admin/revenue/summary")).json();
+  total.textContent = "KES " + summary.total_revenue;
+  today.textContent = "KES " + summary.today_revenue;
+  count.textContent = summary.paid_verifications;
 
-/* ---------- TABS ---------- */
-function openTab(name) {
-  document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
-  document.querySelectorAll("nav button").forEach(b => b.classList.remove("active"));
-  document.getElementById(`tab-${name}`).classList.add("active");
-  event.target.classList.add("active");
-}
-
-/* ---------- DATA ---------- */
-async function init() {
-  loadMerchants();
-  loadTransactions();
-}
-
-async function loadMerchants() {
-  const res = await fetch("/admin/merchants");
-  const merchants = await res.json();
-
-  merchant_table.innerHTML = "";
-  merchant_select.innerHTML = "";
-
-  const placeholder = document.createElement("option");
-  placeholder.textContent = "-- Select merchant --";
-  placeholder.disabled = true;
-  placeholder.selected = true;
-  merchant_select.appendChild(placeholder);
-
-  merchants.forEach(m => {
-    merchant_table.innerHTML += `
-      <tr>
-        <td>${m.name}</td>
-        <td>${m.paybill}</td>
-        <td>${new Date(m.created_at).toLocaleString()}</td>
-      </tr>`;
-
-    const o = document.createElement("option");
-    o.value = m.id;
-    o.textContent = m.name;
-    merchant_select.appendChild(o);
-  });
-}
-
-async function registerMerchant() {
-  await fetch("/admin/merchant", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      name: m_name.value,
-      paybill: m_paybill.value,
-      account_number: m_account_number.value
-    })
-  });
-
-  m_name.value = "";
-  m_paybill.value = "";
-  m_account_number.value = "";
-  loadMerchants();
-}
-
-async function generateQR() {
-  const res = await fetch(`/admin/merchant/${merchant_select.value}/generate-qr`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ store_name: store_name.value })
-  });
-  qr_result.textContent = JSON.stringify(await res.json(), null, 2);
-}
-
-async function loadTransactions() {
-  const res = await fetch("/admin/transactions");
-  const tx = await res.json();
-
-  tx_table.innerHTML = "";
-  tx.forEach(t => {
-    tx_table.innerHTML += `
-      <tr>
-        <td>${t.merchant_name || "-"}</td>
-        <td>${t.amount}</td>
-        <td>${t.status}</td>
-        <td>${new Date(t.created_at).toLocaleString()}</td>
-      </tr>`;
+  const logsData = await (await fetch("/admin/revenue/logs")).json();
+  logs.innerHTML="";
+  logsData.forEach(l=>{
+    logs.innerHTML += `<tr>
+      <td>${l.phone}</td>
+      <td>${l.intended_amount}</td>
+      <td>${l.verification_fee}</td>
+      <td>${new Date(l.created_at).toLocaleString()}</td>
+    </tr>`;
   });
 }
 </script>
