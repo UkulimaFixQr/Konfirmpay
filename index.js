@@ -39,13 +39,11 @@ app.get("/", (_, res) => {
 ========================= */
 app.post("/admin/verify-pin", (req, res) => {
   const { pin } = req.body;
-
   if (!pin) return res.status(400).json({ error: "PIN required" });
 
   if (pin.trim() === process.env.ADMIN_PIN?.trim()) {
     return res.json({ success: true });
   }
-
   return res.status(401).json({ error: "Invalid PIN" });
 });
 
@@ -57,19 +55,16 @@ app.get("/admin/merchants", async (_, res) => {
     .from("merchants")
     .select("*")
     .order("created_at", { ascending: false });
-
   res.json(data || []);
 });
 
 app.post("/admin/merchant", async (req, res) => {
   const { name, paybill, account_number } = req.body;
-
   const { data, error } = await supabase
     .from("merchants")
     .insert({ name, paybill, account_number })
     .select()
     .single();
-
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
 });
@@ -79,7 +74,6 @@ app.post("/admin/merchant", async (req, res) => {
 ========================= */
 function calculateVerificationFee(amount) {
   const amt = Number(amount);
-
   if (amt >= 5 && amt <= 1000) return 1;
   if (amt <= 5000) return 5;
   if (amt <= 10000) return 10;
@@ -90,7 +84,7 @@ function calculateVerificationFee(amount) {
 }
 
 /* =========================
-   DARAJA ACCESS TOKEN
+   DARAJA TOKEN
 ========================= */
 async function getAccessToken() {
   const auth = Buffer.from(
@@ -101,7 +95,6 @@ async function getAccessToken() {
     `${process.env.DARAJA_BASE_URL}/oauth/v1/generate?grant_type=client_credentials`,
     { headers: { Authorization: `Basic ${auth}` } }
   );
-
   return res.data.access_token;
 }
 
@@ -110,7 +103,6 @@ async function getAccessToken() {
 ========================= */
 app.post("/verify/start", async (req, res) => {
   const { merchant_id, phone, amount } = req.body;
-
   if (!merchant_id || !phone || !amount) {
     return res.status(400).json({ error: "Missing fields" });
   }
@@ -142,7 +134,7 @@ app.post("/verify/start", async (req, res) => {
 });
 
 /* =========================
-   REVEAL MERCHANT (GATE)
+   REVEAL MERCHANT
 ========================= */
 app.get("/verify/:session/status", async (req, res) => {
   const { session } = req.params;
@@ -163,10 +155,7 @@ app.get("/verify/:session/status", async (req, res) => {
     .eq("id", v.merchant_id)
     .single();
 
-  res.json({
-    merchant_name: m.name,
-    amount: v.intended_amount
-  });
+  res.json({ merchant_name: m.name, amount: v.intended_amount });
 });
 
 /* =========================
@@ -183,7 +172,7 @@ app.post("/verify/:session/pay", async (req, res) => {
     .single();
 
   if (!v || v.status !== "PAID") {
-    return res.status(403).json({ error: "Verification not completed" });
+    return res.status(403).json({ error: "Verification not complete" });
   }
 
   await axios.post("https://konfirmpay.onrender.com/mpesa/stkpush", {
@@ -197,17 +186,13 @@ app.post("/verify/:session/pay", async (req, res) => {
 });
 
 /* =========================
-   STK PUSH (GENERIC)
+   STK PUSH
 ========================= */
 app.post("/mpesa/stkpush", async (req, res) => {
   try {
     const { phone, amount, merchant_id, account_reference, type } = req.body;
 
-    const timestamp = new Date()
-      .toISOString()
-      .replace(/[^0-9]/g, "")
-      .slice(0, 14);
-
+    const timestamp = new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 14);
     const password = Buffer.from(
       process.env.DARAJA_SHORTCODE +
       process.env.DARAJA_PASSKEY +
@@ -251,7 +236,7 @@ app.post("/mpesa/stkpush", async (req, res) => {
 });
 
 /* =========================
-   CALLBACK (VERIFICATION + PAYMENT)
+   CALLBACK
 ========================= */
 app.post("/mpesa/callback", async (req, res) => {
   const cb = req.body?.Body?.stkCallback;
@@ -263,18 +248,17 @@ app.post("/mpesa/callback", async (req, res) => {
   const receipt = meta.MpesaReceiptNumber;
   const ref = cb.AccountReference;
 
-  // 🔐 VERIFICATION PAYMENT
+  // VERIFICATION
   if (ref?.startsWith("VERIFY_") && receipt) {
     const session = ref.replace("VERIFY_", "");
     await supabase
       .from("verifications")
       .update({ status: "PAID", mpesa_receipt: receipt })
       .eq("session_id", session);
-
     return res.json({ ResultCode: 0 });
   }
 
-  // 💸 MERCHANT PAYMENT
+  // MERCHANT PAYMENT
   if (receipt) {
     const { data: exists } = await supabase
       .from("transactions")
@@ -301,6 +285,42 @@ app.post("/mpesa/callback", async (req, res) => {
   }
 
   res.json({ ResultCode: 0 });
+});
+
+/* =========================
+   ADMIN REVENUE APIs
+========================= */
+app.get("/admin/revenue/summary", async (_, res) => {
+  const { data } = await supabase
+    .from("verifications")
+    .select("verification_fee, created_at")
+    .eq("status", "PAID");
+
+  let total = 0;
+  let today = 0;
+  const todayDate = new Date().toISOString().slice(0, 10);
+
+  data.forEach(v => {
+    total += Number(v.verification_fee);
+    if (v.created_at.startsWith(todayDate)) {
+      today += Number(v.verification_fee);
+    }
+  });
+
+  res.json({
+    total_revenue: total,
+    today_revenue: today,
+    paid_verifications: data.length
+  });
+});
+
+app.get("/admin/revenue/logs", async (_, res) => {
+  const { data } = await supabase
+    .from("verifications")
+    .select("phone, intended_amount, verification_fee, status, created_at")
+    .order("created_at", { ascending: false })
+    .limit(100);
+  res.json(data || []);
 });
 
 /* =========================
