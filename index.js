@@ -48,7 +48,7 @@ app.post("/admin/verify-pin", (req, res) => {
 });
 
 /* =========================
-   ADMIN MERCHANTS
+   ADMIN – MERCHANTS
 ========================= */
 app.get("/admin/merchants", async (_, res) => {
   const { data } = await supabase
@@ -60,13 +60,40 @@ app.get("/admin/merchants", async (_, res) => {
 
 app.post("/admin/merchant", async (req, res) => {
   const { name, paybill, account_number } = req.body;
+
   const { data, error } = await supabase
     .from("merchants")
     .insert({ name, paybill, account_number })
     .select()
     .single();
+
   if (error) return res.status(500).json({ error: error.message });
   res.json(data);
+});
+
+/* =========================
+   ADMIN – GENERATE QR
+========================= */
+app.post("/admin/merchant/:id/generate-qr", async (req, res) => {
+  const { id } = req.params;
+  const { store_name } = req.body;
+
+  const payload = { merchant_id: id, store_name };
+  const qr_payload = Buffer.from(JSON.stringify(payload)).toString("base64");
+
+  res.json({ merchant_id: id, store_name, qr_payload });
+});
+
+/* =========================
+   ADMIN – TRANSACTIONS
+========================= */
+app.get("/admin/transactions", async (_, res) => {
+  const { data } = await supabase
+    .from("transactions")
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(100);
+  res.json(data || []);
 });
 
 /* =========================
@@ -88,14 +115,69 @@ function calculateVerificationFee(amount) {
 ========================= */
 async function getAccessToken() {
   const auth = Buffer.from(
-    process.env.DARAJA_CONSUMER_KEY + ":" + process.env.DARAJA_CONSUMER_SECRET
+    process.env.DARAJA_CONSUMER_KEY + ":" +
+    process.env.DARAJA_CONSUMER_SECRET
   ).toString("base64");
 
   const res = await axios.get(
     `${process.env.DARAJA_BASE_URL}/oauth/v1/generate?grant_type=client_credentials`,
     { headers: { Authorization: `Basic ${auth}` } }
   );
+
   return res.data.access_token;
+}
+
+/* =========================
+   INTERNAL STK FUNCTION (FIX)
+========================= */
+async function sendSTK({
+  phone,
+  amount,
+  merchant_id,
+  account_reference,
+  type
+}) {
+  const timestamp = new Date()
+    .toISOString()
+    .replace(/[^0-9]/g, "")
+    .slice(0, 14);
+
+  const password = Buffer.from(
+    process.env.DARAJA_SHORTCODE +
+    process.env.DARAJA_PASSKEY +
+    timestamp
+  ).toString("base64");
+
+  const token = await getAccessToken();
+
+  const response = await axios.post(
+    `${process.env.DARAJA_BASE_URL}/mpesa/stkpush/v1/processrequest`,
+    {
+      BusinessShortCode: process.env.DARAJA_SHORTCODE,
+      Password: password,
+      Timestamp: timestamp,
+      TransactionType: "CustomerPayBillOnline",
+      Amount: amount,
+      PartyA: phone,
+      PartyB: process.env.DARAJA_SHORTCODE,
+      PhoneNumber: phone,
+      CallBackURL: "https://konfirmpay.onrender.com/mpesa/callback",
+      AccountReference: account_reference || merchant_id,
+      TransactionDesc: type || "KonfirmPay"
+    },
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+
+  await supabase.from("stk_requests").insert({
+    checkout_request_id: response.data.CheckoutRequestID,
+    merchant_id,
+    amount,
+    phone,
+    type,
+    status: "PENDING"
+  });
+
+  return response.data;
 }
 
 /* =========================
@@ -118,7 +200,7 @@ app.post("/verify/start", async (req, res) => {
     verification_fee: verificationFee
   });
 
-  await axios.post("https://konfirmpay.onrender.com/mpesa/stkpush", {
+  await sendSTK({
     phone,
     amount: verificationFee,
     merchant_id: "KONFIRMPAY_VERIFY",
@@ -175,7 +257,7 @@ app.post("/verify/:session/pay", async (req, res) => {
     return res.status(403).json({ error: "Verification not complete" });
   }
 
-  await axios.post("https://konfirmpay.onrender.com/mpesa/stkpush", {
+  await sendSTK({
     phone,
     amount: v.intended_amount,
     merchant_id: v.merchant_id,
@@ -186,49 +268,12 @@ app.post("/verify/:session/pay", async (req, res) => {
 });
 
 /* =========================
-   STK PUSH
+   MANUAL STK (POSTMAN)
 ========================= */
 app.post("/mpesa/stkpush", async (req, res) => {
   try {
-    const { phone, amount, merchant_id, account_reference, type } = req.body;
-
-    const timestamp = new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 14);
-    const password = Buffer.from(
-      process.env.DARAJA_SHORTCODE +
-      process.env.DARAJA_PASSKEY +
-      timestamp
-    ).toString("base64");
-
-    const token = await getAccessToken();
-
-    const response = await axios.post(
-      `${process.env.DARAJA_BASE_URL}/mpesa/stkpush/v1/processrequest`,
-      {
-        BusinessShortCode: process.env.DARAJA_SHORTCODE,
-        Password: password,
-        Timestamp: timestamp,
-        TransactionType: "CustomerPayBillOnline",
-        Amount: amount,
-        PartyA: phone,
-        PartyB: process.env.DARAJA_SHORTCODE,
-        PhoneNumber: phone,
-        CallBackURL: "https://konfirmpay.onrender.com/mpesa/callback",
-        AccountReference: account_reference || merchant_id,
-        TransactionDesc: type || "KonfirmPay"
-      },
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-
-    await supabase.from("stk_requests").insert({
-      checkout_request_id: response.data.CheckoutRequestID,
-      merchant_id,
-      amount,
-      phone,
-      type,
-      status: "PENDING"
-    });
-
-    res.json(response.data);
+    const data = await sendSTK(req.body);
+    res.json(data);
   } catch (e) {
     console.error("❌ STK ERROR", e.response?.data || e.message);
     res.status(500).json({ error: "STK push failed" });
@@ -288,7 +333,7 @@ app.post("/mpesa/callback", async (req, res) => {
 });
 
 /* =========================
-   ADMIN REVENUE APIs
+   ADMIN – REVENUE
 ========================= */
 app.get("/admin/revenue/summary", async (_, res) => {
   const { data } = await supabase
@@ -312,15 +357,6 @@ app.get("/admin/revenue/summary", async (_, res) => {
     today_revenue: today,
     paid_verifications: data.length
   });
-});
-
-app.get("/admin/revenue/logs", async (_, res) => {
-  const { data } = await supabase
-    .from("verifications")
-    .select("phone, intended_amount, verification_fee, status, created_at")
-    .order("created_at", { ascending: false })
-    .limit(100);
-  res.json(data || []);
 });
 
 /* =========================
