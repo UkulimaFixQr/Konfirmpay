@@ -12,7 +12,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-console.log("🔥 KONFIRMPAY STARTING");
+console.log("🔥 KONFIRMPAY BACKEND STARTING");
 
 /* =========================
    STATIC FILES (CAPITAL P)
@@ -28,11 +28,6 @@ const supabase = createClient(
 );
 
 /* =========================
-   CONSTANTS
-========================= */
-const VERIFICATION_FEE = 5;
-
-/* =========================
    HEALTH
 ========================= */
 app.get("/", (_, res) => {
@@ -44,6 +39,7 @@ app.get("/", (_, res) => {
 ========================= */
 app.post("/admin/verify-pin", (req, res) => {
   const { pin } = req.body;
+
   if (!pin) return res.status(400).json({ error: "PIN required" });
 
   if (pin.trim() === process.env.ADMIN_PIN?.trim()) {
@@ -57,7 +53,11 @@ app.post("/admin/verify-pin", (req, res) => {
    ADMIN MERCHANTS
 ========================= */
 app.get("/admin/merchants", async (_, res) => {
-  const { data } = await supabase.from("merchants").select("*").order("created_at", { ascending: false });
+  const { data } = await supabase
+    .from("merchants")
+    .select("*")
+    .order("created_at", { ascending: false });
+
   res.json(data || []);
 });
 
@@ -75,7 +75,22 @@ app.post("/admin/merchant", async (req, res) => {
 });
 
 /* =========================
-   ACCESS TOKEN
+   VERIFICATION FEE LOGIC
+========================= */
+function calculateVerificationFee(amount) {
+  const amt = Number(amount);
+
+  if (amt >= 5 && amt <= 1000) return 1;
+  if (amt <= 5000) return 5;
+  if (amt <= 10000) return 10;
+  if (amt <= 20000) return 15;
+  if (amt <= 30000) return 20;
+  if (amt <= 50000) return 30;
+  return 50;
+}
+
+/* =========================
+   DARAJA ACCESS TOKEN
 ========================= */
 async function getAccessToken() {
   const auth = Buffer.from(
@@ -91,39 +106,38 @@ async function getAccessToken() {
 }
 
 /* =========================
-   START VERIFICATION (PROMPT #1)
+   START VERIFICATION (STK #1)
 ========================= */
 app.post("/verify/start", async (req, res) => {
   const { merchant_id, phone, amount } = req.body;
+
   if (!merchant_id || !phone || !amount) {
     return res.status(400).json({ error: "Missing fields" });
   }
 
   const session_id = crypto.randomUUID();
+  const verificationFee = calculateVerificationFee(amount);
 
   await supabase.from("verifications").insert({
     session_id,
     merchant_id,
     phone,
     intended_amount: amount,
-    verification_fee: VERIFICATION_FEE
+    verification_fee: verificationFee
   });
 
-  // STK PUSH #1 — VERIFICATION
-  await axios.post(
-    "https://konfirmpay.onrender.com/mpesa/stkpush",
-    {
-      phone,
-      amount: VERIFICATION_FEE,
-      merchant_id: "KONFIRMPAY",
-      account_reference: `VERIFY_${session_id}`,
-      type: "VERIFICATION"
-    }
-  );
+  await axios.post("https://konfirmpay.onrender.com/mpesa/stkpush", {
+    phone,
+    amount: verificationFee,
+    merchant_id: "KONFIRMPAY_VERIFY",
+    account_reference: `VERIFY_${session_id}`,
+    type: "VERIFICATION"
+  });
 
   res.json({
     session_id,
-    message: "Verification fee required"
+    verification_fee: verificationFee,
+    message: `Verification fee KES ${verificationFee} required`
   });
 });
 
@@ -156,7 +170,7 @@ app.get("/verify/:session/status", async (req, res) => {
 });
 
 /* =========================
-   PAY MERCHANT (PROMPT #2)
+   PAY MERCHANT (STK #2)
 ========================= */
 app.post("/verify/:session/pay", async (req, res) => {
   const { session } = req.params;
@@ -169,18 +183,15 @@ app.post("/verify/:session/pay", async (req, res) => {
     .single();
 
   if (!v || v.status !== "PAID") {
-    return res.status(403).json({ error: "Verification not complete" });
+    return res.status(403).json({ error: "Verification not completed" });
   }
 
-  await axios.post(
-    "https://konfirmpay.onrender.com/mpesa/stkpush",
-    {
-      phone,
-      amount: v.intended_amount,
-      merchant_id: v.merchant_id,
-      type: "PAYMENT"
-    }
-  );
+  await axios.post("https://konfirmpay.onrender.com/mpesa/stkpush", {
+    phone,
+    amount: v.intended_amount,
+    merchant_id: v.merchant_id,
+    type: "PAYMENT"
+  });
 
   res.json({ message: "Payment request sent" });
 });
@@ -192,7 +203,11 @@ app.post("/mpesa/stkpush", async (req, res) => {
   try {
     const { phone, amount, merchant_id, account_reference, type } = req.body;
 
-    const timestamp = new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 14);
+    const timestamp = new Date()
+      .toISOString()
+      .replace(/[^0-9]/g, "")
+      .slice(0, 14);
+
     const password = Buffer.from(
       process.env.DARAJA_SHORTCODE +
       process.env.DARAJA_PASSKEY +
@@ -230,25 +245,25 @@ app.post("/mpesa/stkpush", async (req, res) => {
 
     res.json(response.data);
   } catch (e) {
-    console.error("STK ERROR", e.response?.data || e.message);
+    console.error("❌ STK ERROR", e.response?.data || e.message);
     res.status(500).json({ error: "STK push failed" });
   }
 });
 
 /* =========================
-   CALLBACK (BOTH PROMPTS)
+   CALLBACK (VERIFICATION + PAYMENT)
 ========================= */
 app.post("/mpesa/callback", async (req, res) => {
   const cb = req.body?.Body?.stkCallback;
   if (!cb) return res.json({});
 
   const meta = {};
-  cb.CallbackMetadata?.Item?.forEach(i => meta[i.Name] = i.Value);
+  cb.CallbackMetadata?.Item?.forEach(i => (meta[i.Name] = i.Value));
 
   const receipt = meta.MpesaReceiptNumber;
   const ref = cb.AccountReference;
 
-  // VERIFICATION PAYMENT
+  // 🔐 VERIFICATION PAYMENT
   if (ref?.startsWith("VERIFY_") && receipt) {
     const session = ref.replace("VERIFY_", "");
     await supabase
@@ -259,7 +274,7 @@ app.post("/mpesa/callback", async (req, res) => {
     return res.json({ ResultCode: 0 });
   }
 
-  // NORMAL PAYMENT (merchant)
+  // 💸 MERCHANT PAYMENT
   if (receipt) {
     const { data: exists } = await supabase
       .from("transactions")
