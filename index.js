@@ -2,8 +2,9 @@ const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
 const axios = require("axios");
-const { createClient } = require("@supabase/supabase-js");
+const crypto = require("crypto");
 const path = require("path");
+const { createClient } = require("@supabase/supabase-js");
 
 dotenv.config();
 
@@ -11,7 +12,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-console.log("🔥 KONFIRMPAY BACKEND STARTING");
+console.log("🔥 KONFIRMPAY STARTING");
 
 /* =========================
    STATIC FILES (CAPITAL P)
@@ -27,31 +28,25 @@ const supabase = createClient(
 );
 
 /* =========================
-   HEALTH CHECK
+   CONSTANTS
 ========================= */
-app.get("/", (req, res) => {
+const VERIFICATION_FEE = 5;
+
+/* =========================
+   HEALTH
+========================= */
+app.get("/", (_, res) => {
   res.send("KonfirmPay backend running");
 });
 
 /* =========================
-   🔐 ADMIN PIN VERIFY (FIXED)
+   ADMIN PIN
 ========================= */
 app.post("/admin/verify-pin", (req, res) => {
   const { pin } = req.body;
+  if (!pin) return res.status(400).json({ error: "PIN required" });
 
-  if (!pin) {
-    return res.status(400).json({ error: "PIN required" });
-  }
-
-  const expectedPin = process.env.ADMIN_PIN;
-
-  if (!expectedPin) {
-    console.error("❌ ADMIN_PIN missing in environment");
-    return res.status(500).json({ error: "Server misconfigured" });
-  }
-
-  // strict string comparison (SAFE)
-  if (pin.trim() === expectedPin.trim()) {
+  if (pin.trim() === process.env.ADMIN_PIN?.trim()) {
     return res.json({ success: true });
   }
 
@@ -59,16 +54,11 @@ app.post("/admin/verify-pin", (req, res) => {
 });
 
 /* =========================
-   ADMIN: MERCHANTS
+   ADMIN MERCHANTS
 ========================= */
-app.get("/admin/merchants", async (req, res) => {
-  const { data, error } = await supabase
-    .from("merchants")
-    .select("*")
-    .order("created_at", { ascending: false });
-
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
+app.get("/admin/merchants", async (_, res) => {
+  const { data } = await supabase.from("merchants").select("*").order("created_at", { ascending: false });
+  res.json(data || []);
 });
 
 app.post("/admin/merchant", async (req, res) => {
@@ -85,90 +75,124 @@ app.post("/admin/merchant", async (req, res) => {
 });
 
 /* =========================
-   ADMIN: GENERATE QR
-========================= */
-app.post("/admin/merchant/:id/generate-qr", async (req, res) => {
-  const { id } = req.params;
-  const { store_name } = req.body;
-
-  const payload = {
-    merchant_id: id,
-    store_name
-  };
-
-  // simple encoded QR payload
-  const qrData = Buffer.from(JSON.stringify(payload)).toString("base64");
-
-  res.json({
-    merchant_id: id,
-    store_name,
-    qr_payload: qrData
-  });
-});
-
-/* =========================
-   ADMIN: TRANSACTIONS
-========================= */
-app.get("/admin/transactions", async (req, res) => {
-  const { data, error } = await supabase
-    .from("transactions")
-    .select(`
-      amount,
-      status,
-      created_at,
-      merchants(name)
-    `)
-    .order("created_at", { ascending: false })
-    .limit(100);
-
-  if (error) return res.status(500).json({ error: error.message });
-
-  const formatted = data.map(t => ({
-    merchant_name: t.merchants?.name || "-",
-    amount: t.amount,
-    status: t.status,
-    created_at: t.created_at
-  }));
-
-  res.json(formatted);
-});
-
-/* =========================
-   DARAJA ACCESS TOKEN
+   ACCESS TOKEN
 ========================= */
 async function getAccessToken() {
   const auth = Buffer.from(
-    process.env.DARAJA_CONSUMER_KEY +
-    ":" +
-    process.env.DARAJA_CONSUMER_SECRET
+    process.env.DARAJA_CONSUMER_KEY + ":" + process.env.DARAJA_CONSUMER_SECRET
   ).toString("base64");
 
   const res = await axios.get(
     `${process.env.DARAJA_BASE_URL}/oauth/v1/generate?grant_type=client_credentials`,
-    {
-      headers: { Authorization: `Basic ${auth}` }
-    }
+    { headers: { Authorization: `Basic ${auth}` } }
   );
 
   return res.data.access_token;
 }
 
 /* =========================
-   STK PUSH (SAME PAYBILL)
+   START VERIFICATION (PROMPT #1)
+========================= */
+app.post("/verify/start", async (req, res) => {
+  const { merchant_id, phone, amount } = req.body;
+  if (!merchant_id || !phone || !amount) {
+    return res.status(400).json({ error: "Missing fields" });
+  }
+
+  const session_id = crypto.randomUUID();
+
+  await supabase.from("verifications").insert({
+    session_id,
+    merchant_id,
+    phone,
+    intended_amount: amount,
+    verification_fee: VERIFICATION_FEE
+  });
+
+  // STK PUSH #1 — VERIFICATION
+  await axios.post(
+    "https://konfirmpay.onrender.com/mpesa/stkpush",
+    {
+      phone,
+      amount: VERIFICATION_FEE,
+      merchant_id: "KONFIRMPAY",
+      account_reference: `VERIFY_${session_id}`,
+      type: "VERIFICATION"
+    }
+  );
+
+  res.json({
+    session_id,
+    message: "Verification fee required"
+  });
+});
+
+/* =========================
+   REVEAL MERCHANT (GATE)
+========================= */
+app.get("/verify/:session/status", async (req, res) => {
+  const { session } = req.params;
+
+  const { data: v } = await supabase
+    .from("verifications")
+    .select("status, merchant_id, intended_amount")
+    .eq("session_id", session)
+    .single();
+
+  if (!v || v.status !== "PAID") {
+    return res.status(403).json({ error: "Verification required" });
+  }
+
+  const { data: m } = await supabase
+    .from("merchants")
+    .select("name")
+    .eq("id", v.merchant_id)
+    .single();
+
+  res.json({
+    merchant_name: m.name,
+    amount: v.intended_amount
+  });
+});
+
+/* =========================
+   PAY MERCHANT (PROMPT #2)
+========================= */
+app.post("/verify/:session/pay", async (req, res) => {
+  const { session } = req.params;
+  const { phone } = req.body;
+
+  const { data: v } = await supabase
+    .from("verifications")
+    .select("status, merchant_id, intended_amount")
+    .eq("session_id", session)
+    .single();
+
+  if (!v || v.status !== "PAID") {
+    return res.status(403).json({ error: "Verification not complete" });
+  }
+
+  await axios.post(
+    "https://konfirmpay.onrender.com/mpesa/stkpush",
+    {
+      phone,
+      amount: v.intended_amount,
+      merchant_id: v.merchant_id,
+      type: "PAYMENT"
+    }
+  );
+
+  res.json({ message: "Payment request sent" });
+});
+
+/* =========================
+   STK PUSH (GENERIC)
 ========================= */
 app.post("/mpesa/stkpush", async (req, res) => {
   try {
-    const { phone, amount, merchant_id } = req.body;
+    const { phone, amount, merchant_id, account_reference, type } = req.body;
 
-    if (!phone || !amount || !merchant_id) {
-      return res.status(400).json({ error: "Missing fields" });
-    }
-
-    const timestamp = new Date()
-      .toISOString()
-      .replace(/[^0-9]/g, "")
-      .slice(0, 14);
-
+    const timestamp = new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 14);
     const password = Buffer.from(
       process.env.DARAJA_SHORTCODE +
       process.env.DARAJA_PASSKEY +
@@ -177,7 +201,7 @@ app.post("/mpesa/stkpush", async (req, res) => {
 
     const token = await getAccessToken();
 
-    const stk = await axios.post(
+    const response = await axios.post(
       `${process.env.DARAJA_BASE_URL}/mpesa/stkpush/v1/processrequest`,
       {
         BusinessShortCode: process.env.DARAJA_SHORTCODE,
@@ -189,90 +213,79 @@ app.post("/mpesa/stkpush", async (req, res) => {
         PartyB: process.env.DARAJA_SHORTCODE,
         PhoneNumber: phone,
         CallBackURL: "https://konfirmpay.onrender.com/mpesa/callback",
-        AccountReference: merchant_id,
-        TransactionDesc: "KonfirmPay Payment"
+        AccountReference: account_reference || merchant_id,
+        TransactionDesc: type || "KonfirmPay"
       },
-      {
-        headers: { Authorization: `Bearer ${token}` }
-      }
+      { headers: { Authorization: `Bearer ${token}` } }
     );
 
     await supabase.from("stk_requests").insert({
-      checkout_request_id: stk.data.CheckoutRequestID,
+      checkout_request_id: response.data.CheckoutRequestID,
       merchant_id,
       amount,
       phone,
+      type,
       status: "PENDING"
     });
 
-    res.json(stk.data);
-  } catch (err) {
-    console.error("❌ STK ERROR:", err.response?.data || err.message);
+    res.json(response.data);
+  } catch (e) {
+    console.error("STK ERROR", e.response?.data || e.message);
     res.status(500).json({ error: "STK push failed" });
   }
 });
 
 /* =========================
-   🔔 M-PESA CALLBACK (SAFE)
+   CALLBACK (BOTH PROMPTS)
 ========================= */
 app.post("/mpesa/callback", async (req, res) => {
-  try {
-    const callback = req.body?.Body?.stkCallback;
-    if (!callback) {
-      return res.status(400).json({ message: "Invalid callback" });
-    }
+  const cb = req.body?.Body?.stkCallback;
+  if (!cb) return res.json({});
 
-    const { CheckoutRequestID, CallbackMetadata } = callback;
+  const meta = {};
+  cb.CallbackMetadata?.Item?.forEach(i => meta[i.Name] = i.Value);
 
-    let meta = {};
-    if (CallbackMetadata?.Item) {
-      CallbackMetadata.Item.forEach(i => (meta[i.Name] = i.Value));
-    }
+  const receipt = meta.MpesaReceiptNumber;
+  const ref = cb.AccountReference;
 
-    // interim callback
-    if (!meta.MpesaReceiptNumber) {
-      return res.json({ ResultCode: 0, ResultDesc: "Interim accepted" });
-    }
+  // VERIFICATION PAYMENT
+  if (ref?.startsWith("VERIFY_") && receipt) {
+    const session = ref.replace("VERIFY_", "");
+    await supabase
+      .from("verifications")
+      .update({ status: "PAID", mpesa_receipt: receipt })
+      .eq("session_id", session);
 
-    // dedupe
+    return res.json({ ResultCode: 0 });
+  }
+
+  // NORMAL PAYMENT (merchant)
+  if (receipt) {
     const { data: exists } = await supabase
       .from("transactions")
       .select("id")
-      .eq("checkout_request_id", CheckoutRequestID)
+      .eq("mpesa_receipt", receipt)
       .maybeSingle();
 
-    if (exists) {
-      return res.json({ ResultCode: 0, ResultDesc: "Duplicate ignored" });
+    if (!exists) {
+      const { data: stk } = await supabase
+        .from("stk_requests")
+        .select("merchant_id, amount")
+        .eq("checkout_request_id", cb.CheckoutRequestID)
+        .single();
+
+      if (stk) {
+        await supabase.from("transactions").insert({
+          merchant_id: stk.merchant_id,
+          amount: stk.amount,
+          mpesa_receipt: receipt,
+          status: "PAID"
+        });
+      }
     }
-
-    const { data: stk } = await supabase
-      .from("stk_requests")
-      .select("merchant_id, amount")
-      .eq("checkout_request_id", CheckoutRequestID)
-      .single();
-
-    if (!stk) {
-      return res.status(400).json({ error: "Unknown transaction" });
-    }
-
-    await supabase.from("transactions").insert({
-      merchant_id: stk.merchant_id,
-      checkout_request_id: CheckoutRequestID,
-      mpesa_receipt: meta.MpesaReceiptNumber,
-      amount: stk.amount,
-      status: "PAID"
-    });
-
-    await supabase
-      .from("stk_requests")
-      .update({ status: "PAID" })
-      .eq("checkout_request_id", CheckoutRequestID);
-
-    return res.json({ ResultCode: 0, ResultDesc: "Accepted" });
-  } catch (err) {
-    console.error("🔥 CALLBACK ERROR:", err);
-    res.status(500).json({ error: "Server error" });
   }
+
+  res.json({ ResultCode: 0 });
 });
 
 /* =========================
