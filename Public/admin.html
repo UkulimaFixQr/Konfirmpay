@@ -1,90 +1,301 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <title>KonfirmPay Admin</title>
   <meta charset="UTF-8" />
+  <title>KonfirmPay Admin</title>
+
   <style>
-    body { font-family: Arial; background:#f5f5f5; margin:0 }
-    .lock, .dash { height:100vh; display:flex; align-items:center; justify-content:center }
-    .card { background:white; padding:30px; width:360px; border-radius:10px }
-    .dash { display:none; padding:20px; align-items:flex-start }
-    h2 { margin-top:0 }
-    button { padding:10px; width:100%; margin-top:10px }
-    table { width:100%; border-collapse:collapse; margin-top:20px }
-    th, td { border:1px solid #ccc; padding:8px }
-    .cards { display:grid; grid-template-columns:repeat(3,1fr); gap:15px }
-    .cardbox { background:white; padding:15px; border-radius:8px }
+    body {
+      font-family: "Segoe UI", Arial, sans-serif;
+      margin: 0;
+      background: #f4f6f8;
+    }
+
+    .lock-screen {
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .card {
+      background: white;
+      padding: 30px;
+      width: 380px;
+      border-radius: 12px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.15);
+      text-align: center;
+    }
+
+    input, select {
+      padding: 10px;
+      width: 100%;
+      margin-top: 10px;
+      font-size: 14px;
+    }
+
+    button {
+      margin-top: 12px;
+      padding: 10px;
+      width: 100%;
+      border: none;
+      background: #111;
+      color: white;
+      font-size: 14px;
+      cursor: pointer;
+      border-radius: 6px;
+    }
+
+    button.secondary {
+      background: #555;
+    }
+
+    .error {
+      color: red;
+      margin-top: 10px;
+    }
+
+    .dashboard {
+      display: none;
+      padding: 30px;
+    }
+
+    h1 {
+      margin-top: 0;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 20px;
+    }
+
+    .box {
+      background: white;
+      padding: 20px;
+      border-radius: 10px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 15px;
+      font-size: 13px;
+    }
+
+    th, td {
+      border: 1px solid #ddd;
+      padding: 8px;
+    }
+
+    th {
+      background: #f0f0f0;
+    }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(3,1fr);
+      gap: 15px;
+    }
+
+    .stat {
+      background: #111;
+      color: white;
+      padding: 15px;
+      border-radius: 8px;
+      text-align: center;
+    }
+
+    pre {
+      background: #f7f7f7;
+      padding: 10px;
+      font-size: 12px;
+      overflow-x: auto;
+    }
   </style>
 </head>
+
 <body>
 
-<div class="lock" id="lock">
+<!-- 🔐 LOCK SCREEN -->
+<div class="lock-screen" id="lock">
   <div class="card">
-    <h2>Admin Login</h2>
-    <input id="pin" type="password" placeholder="PIN" />
-    <button onclick="login()">Login</button>
-    <p id="err"></p>
+    <h2>🔐 KonfirmPay Admin</h2>
+    <input type="password" id="pin" placeholder="Enter Admin PIN" />
+    <button onclick="unlock()">Unlock</button>
+    <div class="error" id="err"></div>
   </div>
 </div>
 
-<div class="dash" id="dash">
-  <div style="width:100%">
-    <h2>KonfirmPay Revenue</h2>
+<!-- 📊 DASHBOARD -->
+<div class="dashboard" id="dashboard">
 
-    <div class="cards">
-      <div class="cardbox"><b>Total Revenue</b><br><span id="total"></span></div>
-      <div class="cardbox"><b>Today</b><br><span id="today"></span></div>
-      <div class="cardbox"><b>Paid Verifications</b><br><span id="count"></span></div>
+  <h1>KonfirmPay Admin Dashboard</h1>
+
+  <!-- REVENUE -->
+  <div class="grid">
+    <div class="stat">
+      <div>Total Revenue</div>
+      <h2 id="rev_total">—</h2>
+    </div>
+    <div class="stat">
+      <div>Today</div>
+      <h2 id="rev_today">—</h2>
+    </div>
+    <div class="stat">
+      <div>Paid Verifications</div>
+      <h2 id="rev_count">—</h2>
+    </div>
+  </div>
+
+  <br />
+
+  <div class="grid">
+
+    <!-- REGISTER MERCHANT -->
+    <div class="box">
+      <h3>Register Merchant</h3>
+      <input id="m_name" placeholder="Merchant name" />
+      <input id="m_paybill" placeholder="Paybill" />
+      <input id="m_account" placeholder="Account number" />
+      <button onclick="registerMerchant()">Register</button>
+      <pre id="merchant_result"></pre>
     </div>
 
-    <h3>Verification Logs</h3>
+    <!-- GENERATE QR -->
+    <div class="box">
+      <h3>Generate QR</h3>
+      <select id="merchant_select">
+        <option value="">Select merchant</option>
+      </select>
+      <input id="store_name" placeholder="Store name" />
+      <button onclick="generateQR()">Generate QR</button>
+      <pre id="qr_result"></pre>
+    </div>
+
+  </div>
+
+  <br />
+
+  <!-- TRANSACTIONS -->
+  <div class="box">
+    <h3>Recent Transactions</h3>
     <table>
       <thead>
         <tr>
           <th>Phone</th>
           <th>Amount</th>
-          <th>Fee</th>
+          <th>Status</th>
           <th>Date</th>
         </tr>
       </thead>
-      <tbody id="logs"></tbody>
+      <tbody id="tx_table"></tbody>
     </table>
   </div>
+
 </div>
 
 <script>
-async function login() {
+async function unlock() {
+  err.textContent = "";
+
   const res = await fetch("/admin/verify-pin", {
-    method:"POST",
-    headers:{ "Content-Type":"application/json" },
-    body:JSON.stringify({ pin: pin.value })
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pin: pin.value })
   });
 
-  if (res.ok) {
-    lock.style.display="none";
-    dash.style.display="flex";
-    loadRevenue();
-  } else {
-    err.textContent="Invalid PIN";
+  if (!res.ok) {
+    err.textContent = "Invalid PIN";
+    return;
   }
+
+  lock.style.display = "none";
+  dashboard.style.display = "block";
+
+  loadMerchants();
+  loadTransactions();
+  loadRevenue();
+}
+
+async function loadMerchants() {
+  const res = await fetch("/admin/merchants");
+  const merchants = await res.json();
+
+  merchant_select.innerHTML = `<option value="">Select merchant</option>`;
+
+  merchants.forEach(m => {
+    const opt = document.createElement("option");
+    opt.value = m.id;
+    opt.textContent = `${m.name} (${m.paybill})`;
+    merchant_select.appendChild(opt);
+  });
+}
+
+async function registerMerchant() {
+  merchant_result.textContent = "Saving...";
+
+  const res = await fetch("/admin/merchant", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: m_name.value,
+      paybill: m_paybill.value,
+      account_number: m_account.value
+    })
+  });
+
+  merchant_result.textContent = JSON.stringify(await res.json(), null, 2);
+
+  m_name.value = "";
+  m_paybill.value = "";
+  m_account.value = "";
+
+  loadMerchants();
+}
+
+async function generateQR() {
+  if (!merchant_select.value) {
+    qr_result.textContent = "Select a merchant first";
+    return;
+  }
+
+  qr_result.textContent = "Generating...";
+
+  const res = await fetch(`/admin/merchant/${merchant_select.value}/generate-qr`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ store_name: store_name.value })
+  });
+
+  qr_result.textContent = JSON.stringify(await res.json(), null, 2);
+}
+
+async function loadTransactions() {
+  const res = await fetch("/admin/transactions");
+  const tx = await res.json();
+
+  tx_table.innerHTML = "";
+
+  tx.forEach(t => {
+    tx_table.innerHTML += `
+      <tr>
+        <td>${t.phone || ""}</td>
+        <td>${t.amount}</td>
+        <td>${t.status}</td>
+        <td>${new Date(t.created_at).toLocaleString()}</td>
+      </tr>
+    `;
+  });
 }
 
 async function loadRevenue() {
-  const summary = await (await fetch("/admin/revenue/summary")).json();
-  total.textContent = "KES " + summary.total_revenue;
-  today.textContent = "KES " + summary.today_revenue;
-  count.textContent = summary.paid_verifications;
+  const res = await fetch("/admin/revenue/summary");
+  const data = await res.json();
 
-  const logsData = await (await fetch("/admin/revenue/logs")).json();
-  logs.innerHTML="";
-  logsData.forEach(l=>{
-    logs.innerHTML += `<tr>
-      <td>${l.phone}</td>
-      <td>${l.intended_amount}</td>
-      <td>${l.verification_fee}</td>
-      <td>${new Date(l.created_at).toLocaleString()}</td>
-    </tr>`;
-  });
+  rev_total.textContent = "KES " + data.total_revenue;
+  rev_today.textContent = "KES " + data.today_revenue;
+  rev_count.textContent = data.paid_verifications;
 }
 </script>
 
