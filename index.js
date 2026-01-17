@@ -1,3 +1,7 @@
+/*************************************************
+ * KONFIRMPAY — FINAL VERIFIED BACKEND
+ *************************************************/
+
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
@@ -12,26 +16,34 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-console.log("🔥 KONFIRMPAY BACKEND STARTING");
+/* ===========================
+   BOOT LOG
+=========================== */
+console.log("🔥 KonfirmPay backend starting");
 
-/* ============================
+/* ===========================
    STATIC FILES (CAPITAL P)
-============================ */
+=========================== */
 app.use(express.static(path.join(__dirname, "Public")));
 
-/* ============================
+/* ===========================
    SUPABASE
-============================ */
+=========================== */
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-console.log("✅ Supabase connected:", !!process.env.SUPABASE_URL);
+/* ===========================
+   HEALTH
+=========================== */
+app.get("/", (_, res) => {
+  res.send("KonfirmPay backend running");
+});
 
-/* ============================
+/* ===========================
    HELPERS
-============================ */
+=========================== */
 function verificationFee(amount) {
   if (amount <= 1000) return 1;
   if (amount <= 5000) return 5;
@@ -42,9 +54,9 @@ function verificationFee(amount) {
   return 50;
 }
 
-async function mpesaToken() {
+async function darajaToken() {
   const auth = Buffer.from(
-    process.env.DARAJA_CONSUMER_KEY + ":" + process.env.DARAJA_CONSUMER_SECRET
+    `${process.env.DARAJA_CONSUMER_KEY}:${process.env.DARAJA_CONSUMER_SECRET}`
   ).toString("base64");
 
   const res = await axios.get(
@@ -55,79 +67,51 @@ async function mpesaToken() {
   return res.data.access_token;
 }
 
-/* ============================
-   HEALTH
-============================ */
-app.get("/", (_, res) => {
-  res.send("KonfirmPay backend running");
-});
-
-/* ============================
-   ADMIN AUTH
-============================ */
-app.post("/admin/verify-pin", (req, res) => {
-  if (req.body.pin === process.env.ADMIN_PIN) return res.sendStatus(200);
-  res.sendStatus(401);
-});
-
-/* ============================
-   MERCHANTS
-============================ */
-app.post("/admin/merchant", async (req, res) => {
-  const { data, error } = await supabase.from("merchants").insert(req.body).select();
-  if (error) return res.status(500).json(error);
-  res.json(data[0]);
-});
-
-app.get("/admin/merchants", async (_, res) => {
-  const { data } = await supabase.from("merchants").select("*");
-  res.json(data);
-});
-
-app.post("/admin/merchant/:id/generate-qr", async (req, res) => {
-  const payload = Buffer.from(
-    JSON.stringify({
-      merchant_id: req.params.id,
-      store_name: req.body.store_name
-    })
-  ).toString("base64");
-
-  res.json({ qr_payload: payload });
-});
-
-/* ============================
-   VERIFY START (FIRST PROMPT)
-============================ */
+/* ===========================
+   VERIFY START (STK #1)
+=========================== */
 app.post("/verify/start", async (req, res) => {
-  console.log("🔔 VERIFY START:", req.body);
-
-  const { merchant_id, phone, amount } = req.body;
-  const fee = verificationFee(amount);
-  const session_id = crypto.randomUUID();
-
-  // 🔑 THIS WAS MISSING BEFORE — INSERT FIRST
-  const { error } = await supabase.from("verifications").insert([{
-    id: session_id,
-    merchant_id,
-    phone,
-    amount,
-    verification_fee: fee,
-    status: "PENDING"
-  }]);
-
-  if (error) {
-    console.error("❌ INSERT FAILED:", error);
-    return res.status(500).json({ error: "DB insert failed" });
-  }
-
-  console.log("✅ Verification row created:", session_id);
-
-  // STK PUSH FOR VERIFICATION FEE
   try {
-    const token = await mpesaToken();
-    const timestamp = new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 14);
+    console.log("➡️ /verify/start", req.body);
+
+    const { merchant_id, phone, amount } = req.body;
+    if (!merchant_id || !phone || !amount) {
+      return res.status(400).json({ error: "Missing fields" });
+    }
+
+    // THIS UUID IS THE SESSION ID
+    const verificationId = crypto.randomUUID();
+    const fee = verificationFee(amount);
+
+    const { error } = await supabase
+      .from("verifications")
+      .insert([{
+        id: verificationId,
+        merchant_id,
+        phone,
+        amount,
+        verification_fee: fee,
+        status: "PENDING"
+      }]);
+
+    if (error) {
+      console.error("❌ VERIFICATION INSERT FAILED:", error);
+      return res.status(500).json({ error: "DB insert failed" });
+    }
+
+    console.log("✅ VERIFICATION CREATED:", verificationId);
+
+    // STK PUSH — VERIFICATION FEE
+    const token = await darajaToken();
+    const timestamp = new Date()
+      .toISOString()
+      .replace(/[^0-9]/g, "")
+      .slice(0, 14);
+
     const password = Buffer.from(
-      process.env.DARAJA_SHORTCODE + process.env.DARAJA_PASSKEY + timestamp
+      process.env.DARAJA_SHORTCODE +
+      process.env.DARAJA_PASSKEY +
+      timestamp
     ).toString("base64");
 
     await axios.post(
@@ -142,71 +126,91 @@ app.post("/verify/start", async (req, res) => {
         PartyB: process.env.DARAJA_SHORTCODE,
         PhoneNumber: phone,
         CallBackURL: process.env.DARAJA_CALLBACK_URL,
-        AccountReference: session_id,
-        TransactionDesc: "KonfirmPay verification fee"
+        AccountReference: verificationId,
+        TransactionDesc: "KonfirmPay Verification Fee"
       },
       { headers: { Authorization: `Bearer ${token}` } }
     );
-  } catch (e) {
-    console.error("❌ STK ERROR:", e.response?.data || e.message);
-  }
 
-  res.json({
-    session_id,
-    verification_fee: fee,
-    message: `Verification fee KES ${fee} required`
-  });
+    res.json({
+      session_id: verificationId,
+      verification_fee: fee,
+      message: `Verification fee KES ${fee} required`
+    });
+
+  } catch (err) {
+    console.error("❌ /verify/start ERROR", err.response?.data || err);
+    res.status(500).json({ error: "Verification start failed" });
+  }
 });
 
-/* ============================
-   VERIFY STATUS
-============================ */
+/* ===========================
+   CHECK STATUS
+=========================== */
 app.get("/verify/:id/status", async (req, res) => {
-  const { data } = await supabase
+  const { id } = req.params;
+
+  const { data, error } = await supabase
     .from("verifications")
-    .select("*")
-    .eq("id", req.params.id)
+    .select("status, merchant_id, amount")
+    .eq("id", id)
     .single();
 
-  if (!data || data.status !== "PAID") {
+  if (error || !data || data.status !== "PAID") {
     return res.status(403).json({ error: "verification required" });
   }
 
   const { data: merchant } = await supabase
     .from("merchants")
-    .select("name,paybill")
+    .select("name, paybill")
     .eq("id", data.merchant_id)
     .single();
 
-  res.json({ merchant });
+  res.json({
+    merchant,
+    amount: data.amount
+  });
 });
 
-/* ============================
-   MPESA CALLBACK
-============================ */
+/* ===========================
+   M-PESA CALLBACK
+=========================== */
 app.post("/mpesa/callback", async (req, res) => {
-  console.log("🔔 CALLBACK RECEIVED");
+  console.log("📥 CALLBACK RECEIVED");
+  console.log(JSON.stringify(req.body, null, 2));
 
   const stk = req.body?.Body?.stkCallback;
-  if (!stk || stk.ResultCode !== 0) return res.json({ ok: true });
+  if (!stk) return res.json({ ResultCode: 0 });
 
-  const meta = stk.CallbackMetadata.Item;
-  const receipt = meta.find(i => i.Name === "MpesaReceiptNumber")?.Value;
-  const account = stk.CheckoutRequestID;
+  if (stk.ResultCode !== 0) return res.json({ ResultCode: 0 });
 
-  await supabase
+  const receipt = stk.CallbackMetadata.Item
+    .find(i => i.Name === "MpesaReceiptNumber")?.Value;
+
+  // 🔑 THIS MUST MATCH verifications.id
+  const verificationId = stk.CheckoutRequestID;
+
+  const { error } = await supabase
     .from("verifications")
-    .update({ status: "PAID", mpesa_receipt: receipt })
-    .eq("id", stk.MerchantRequestID);
+    .update({
+      status: "PAID",
+      mpesa_receipt: receipt
+    })
+    .eq("id", verificationId);
 
-  console.log("✅ VERIFICATION PAID:", receipt);
-  res.json({ ok: true });
+  if (error) {
+    console.error("❌ CALLBACK UPDATE FAILED:", error);
+  } else {
+    console.log("✅ VERIFICATION MARKED PAID:", verificationId);
+  }
+
+  res.json({ ResultCode: 0 });
 });
 
-/* ============================
-   START
-============================ */
+/* ===========================
+   START SERVER (RENDER)
+=========================== */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`🚀 SERVER RUNNING ON PORT ${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
 });
