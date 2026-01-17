@@ -1,216 +1,181 @@
-/*************************************************
- * KONFIRMPAY — FINAL VERIFIED BACKEND
- *************************************************/
-
-const express = require("express");
-const cors = require("cors");
-const dotenv = require("dotenv");
-const axios = require("axios");
-const crypto = require("crypto");
-const path = require("path");
-const { createClient } = require("@supabase/supabase-js");
-
-dotenv.config();
+import express from "express";
+import axios from "axios";
+import { createClient } from "@supabase/supabase-js";
+import crypto from "crypto";
 
 const app = express();
-app.use(cors());
 app.use(express.json());
 
-/* ===========================
-   BOOT LOG
-=========================== */
-console.log("🔥 KonfirmPay backend starting");
+// ================== CONFIG ==================
+const PORT = process.env.PORT || 10000;
 
-/* ===========================
-   STATIC FILES (CAPITAL P)
-=========================== */
-app.use(express.static(path.join(__dirname, "Public")));
-
-/* ===========================
-   SUPABASE
-=========================== */
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-/* ===========================
-   HEALTH
-=========================== */
-app.get("/", (_, res) => {
-  res.send("KonfirmPay backend running");
-});
+const DARAJA_BASE_URL = "https://sandbox.safaricom.co.ke";
+const SHORTCODE = process.env.DARAJA_SHORTCODE;
+const PASSKEY = process.env.DARAJA_PASSKEY;
+const CONSUMER_KEY = process.env.DARAJA_CONSUMER_KEY;
+const CONSUMER_SECRET = process.env.DARAJA_CONSUMER_SECRET;
+const CALLBACK_URL = "https://konfirmpay.onrender.com/mpesa/callback";
 
-/* ===========================
-   HELPERS
-=========================== */
-function verificationFee(amount) {
-  if (amount <= 1000) return 1;
-  if (amount <= 5000) return 5;
-  if (amount <= 10000) return 10;
-  if (amount <= 20000) return 15;
-  if (amount <= 30000) return 20;
-  if (amount <= 50000) return 30;
-  return 50;
+// ================== HELPERS ==================
+function getTimestamp() {
+  return new Date()
+    .toISOString()
+    .replace(/[^0-9]/g, "")
+    .slice(0, 14);
 }
 
-async function darajaToken() {
+async function getAccessToken() {
   const auth = Buffer.from(
-    `${process.env.DARAJA_CONSUMER_KEY}:${process.env.DARAJA_CONSUMER_SECRET}`
+    `${CONSUMER_KEY}:${CONSUMER_SECRET}`
   ).toString("base64");
 
   const res = await axios.get(
-    "https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials",
+    `${DARAJA_BASE_URL}/oauth/v1/generate?grant_type=client_credentials`,
     { headers: { Authorization: `Basic ${auth}` } }
   );
 
   return res.data.access_token;
 }
 
-/* ===========================
-   VERIFY START (STK #1)
-=========================== */
+// ================== ROUTES ==================
+
+// 🔹 START VERIFICATION (POSTMAN)
 app.post("/verify/start", async (req, res) => {
   try {
-    console.log("➡️ /verify/start", req.body);
-
     const { merchant_id, phone, amount } = req.body;
+
     if (!merchant_id || !phone || !amount) {
       return res.status(400).json({ error: "Missing fields" });
     }
 
-    // THIS UUID IS THE SESSION ID
     const verificationId = crypto.randomUUID();
-    const fee = verificationFee(amount);
 
-    const { error } = await supabase
+    // Insert verification row FIRST
+    const { error: insertError } = await supabase
       .from("verifications")
-      .insert([{
+      .insert({
         id: verificationId,
         merchant_id,
         phone,
         amount,
-        verification_fee: fee,
+        verification_fee: 5,
         status: "PENDING"
-      }]);
+      });
 
-    if (error) {
-      console.error("❌ VERIFICATION INSERT FAILED:", error);
+    if (insertError) {
+      console.error("INSERT FAILED:", insertError);
       return res.status(500).json({ error: "DB insert failed" });
     }
 
-    console.log("✅ VERIFICATION CREATED:", verificationId);
-
-    // STK PUSH — VERIFICATION FEE
-    const token = await darajaToken();
-    const timestamp = new Date()
-      .toISOString()
-      .replace(/[^0-9]/g, "")
-      .slice(0, 14);
-
+    const token = await getAccessToken();
+    const timestamp = getTimestamp();
     const password = Buffer.from(
-      process.env.DARAJA_SHORTCODE +
-      process.env.DARAJA_PASSKEY +
-      timestamp
+      SHORTCODE + PASSKEY + timestamp
     ).toString("base64");
 
-    await axios.post(
-      "https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest",
+    const stkRes = await axios.post(
+      `${DARAJA_BASE_URL}/mpesa/stkpush/v1/processrequest`,
       {
-        BusinessShortCode: process.env.DARAJA_SHORTCODE,
+        BusinessShortCode: SHORTCODE,
         Password: password,
         Timestamp: timestamp,
         TransactionType: "CustomerPayBillOnline",
-        Amount: fee,
+        Amount: 5,
         PartyA: phone,
-        PartyB: process.env.DARAJA_SHORTCODE,
+        PartyB: SHORTCODE,
         PhoneNumber: phone,
-        CallBackURL: process.env.DARAJA_CALLBACK_URL,
+        CallBackURL: CALLBACK_URL,
         AccountReference: verificationId,
-        TransactionDesc: "KonfirmPay Verification Fee"
+        TransactionDesc: "Verification Fee"
       },
       { headers: { Authorization: `Bearer ${token}` } }
     );
 
+    // Save CheckoutRequestID
+    await supabase
+      .from("verifications")
+      .update({ checkout_request_id: stkRes.data.CheckoutRequestID })
+      .eq("id", verificationId);
+
     res.json({
       session_id: verificationId,
-      verification_fee: fee,
-      message: `Verification fee KES ${fee} required`
+      verification_fee: 5,
+      message: "Verification fee KES 5 required"
     });
-
   } catch (err) {
-    console.error("❌ /verify/start ERROR", err.response?.data || err);
+    console.error("VERIFY START ERROR:", err.response?.data || err.message);
     res.status(500).json({ error: "Verification start failed" });
   }
 });
 
-/* ===========================
-   CHECK STATUS
-=========================== */
+// 🔹 M-PESA CALLBACK
+app.post("/mpesa/callback", async (req, res) => {
+  try {
+    const stk = req.body.Body.stkCallback;
+    const checkoutId = stk.CheckoutRequestID;
+
+    if (stk.ResultCode !== 0) {
+      return res.json({ ok: true });
+    }
+
+    const meta = stk.CallbackMetadata.Item;
+    const receipt = meta.find(i => i.Name === "MpesaReceiptNumber")?.Value;
+
+    // ✅ UPDATE USING checkout_request_id (NOT UUID)
+    const { error } = await supabase
+      .from("verifications")
+      .update({
+        status: "PAID",
+        mpesa_receipt: receipt
+      })
+      .eq("checkout_request_id", checkoutId);
+
+    if (error) {
+      console.error("CALLBACK UPDATE FAILED:", error);
+    } else {
+      console.log("VERIFICATION PAID:", receipt);
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("CALLBACK ERROR:", err.message);
+    res.json({ ok: true });
+  }
+});
+
+// 🔹 CHECK STATUS (POSTMAN / FRONTEND)
 app.get("/verify/:id/status", async (req, res) => {
   const { id } = req.params;
 
   const { data, error } = await supabase
     .from("verifications")
-    .select("status, merchant_id, amount")
+    .select("*")
     .eq("id", id)
     .single();
 
-  if (error || !data || data.status !== "PAID") {
+  if (error || !data) {
+    return res.status(404).json({ error: "Not found" });
+  }
+
+  if (data.status !== "PAID") {
     return res.status(403).json({ error: "verification required" });
   }
 
-  const { data: merchant } = await supabase
-    .from("merchants")
-    .select("name, paybill")
-    .eq("id", data.merchant_id)
-    .single();
-
   res.json({
-    merchant,
-    amount: data.amount
+    merchant: {
+      id: data.merchant_id,
+      phone: data.phone,
+      amount: data.amount
+    }
   });
 });
 
-/* ===========================
-   M-PESA CALLBACK
-=========================== */
-app.post("/mpesa/callback", async (req, res) => {
-  console.log("📥 CALLBACK RECEIVED");
-  console.log(JSON.stringify(req.body, null, 2));
-
-  const stk = req.body?.Body?.stkCallback;
-  if (!stk) return res.json({ ResultCode: 0 });
-
-  if (stk.ResultCode !== 0) return res.json({ ResultCode: 0 });
-
-  const receipt = stk.CallbackMetadata.Item
-    .find(i => i.Name === "MpesaReceiptNumber")?.Value;
-
-  // 🔑 THIS MUST MATCH verifications.id
-  const verificationId = stk.CheckoutRequestID;
-
-  const { error } = await supabase
-    .from("verifications")
-    .update({
-      status: "PAID",
-      mpesa_receipt: receipt
-    })
-    .eq("id", verificationId);
-
-  if (error) {
-    console.error("❌ CALLBACK UPDATE FAILED:", error);
-  } else {
-    console.log("✅ VERIFICATION MARKED PAID:", verificationId);
-  }
-
-  res.json({ ResultCode: 0 });
-});
-
-/* ===========================
-   START SERVER (RENDER)
-=========================== */
-const PORT = process.env.PORT || 10000;
+// ================== SERVER ==================
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`SERVER RUNNING ON PORT ${PORT}`);
 });
