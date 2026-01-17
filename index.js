@@ -1,199 +1,240 @@
-require("dotenv").config();
+import express from "express";
+import dotenv from "dotenv";
+import crypto from "crypto";
+import { createClient } from "@supabase/supabase-js";
 
-const express = require("express");
-const cors = require("cors");
-const axios = require("axios");
-const crypto = require("crypto");
-const { createClient } = require("@supabase/supabase-js");
+dotenv.config();
 
 const app = express();
-app.use(cors());
 app.use(express.json());
 
-// ======================
-// GLOBAL REQUEST LOGGER (FIXES LOG ISSUE)
-// ======================
-app.use((req, res, next) => {
-  console.log(
-    `[${new Date().toISOString()}] ${req.method} ${req.originalUrl}`
-  );
-  next();
-});
-
-console.log("🔥 KONFIRMPAY BACKEND STARTING");
-
-// ======================
-// SUPABASE
-// ======================
+/* =========================
+   SUPABASE (SERVICE ROLE)
+========================= */
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-console.log("✅ Supabase connected");
+/* =========================
+   DARAJA CONSTANTS (SANDBOX)
+========================= */
+const DARAJA_BASE = "https://sandbox.safaricom.co.ke";
 
-// ======================
-// HEALTH
-// ======================
-app.get("/", (req, res) => {
-  console.log("✅ HEALTH CHECK HIT");
-  res.send("KonfirmPay backend running");
-});
+/* =========================
+   DARAJA ACCESS TOKEN
+========================= */
+async function getDarajaToken() {
+  const auth = Buffer.from(
+    `${process.env.DARAJA_CONSUMER_KEY}:${process.env.DARAJA_CONSUMER_SECRET}`
+  ).toString("base64");
 
-// ======================
-// VERIFICATION FEE LOGIC
-// ======================
-function calculateVerificationFee(amount) {
-  if (amount <= 1000) return 1;
-  if (amount <= 5000) return 5;
-  if (amount <= 10000) return 10;
-  if (amount <= 20000) return 15;
-  if (amount <= 30000) return 20;
-  if (amount <= 50000) return 30;
-  return 50;
+  const res = await fetch(
+    `${DARAJA_BASE}/oauth/v1/generate?grant_type=client_credentials`,
+    {
+      headers: { Authorization: `Basic ${auth}` }
+    }
+  );
+
+  if (!res.ok) {
+    const text = await res.text();
+    console.error("❌ DARAJA TOKEN ERROR:", text);
+    throw new Error("Daraja token failed");
+  }
+
+  const data = await res.json();
+  console.log("✅ DARAJA TOKEN OK");
+  return data.access_token;
 }
 
-// ======================
-// VERIFY START
-// ======================
+/* =========================
+   PASSWORD + TIMESTAMP
+========================= */
+function darajaPassword() {
+  const timestamp = new Date()
+    .toISOString()
+    .replace(/[^0-9]/g, "")
+    .slice(0, 14);
+
+  const password = Buffer.from(
+    process.env.DARAJA_SHORTCODE +
+      process.env.DARAJA_PASSKEY +
+      timestamp
+  ).toString("base64");
+
+  return { password, timestamp };
+}
+
+/* =========================
+   HEALTH
+========================= */
+app.get("/", (_, res) => {
+  res.json({ status: "KonfirmPay sandbox running" });
+});
+
+/* =========================
+   VERIFY START (STK 1)
+========================= */
 app.post("/verify/start", async (req, res) => {
   try {
-    const { merchant_id, phone, amount } = req.body;
-
     console.log("🔔 VERIFY START:", req.body);
 
-    const verificationFee = calculateVerificationFee(amount);
+    const { merchant_id, phone, amount } = req.body;
+    if (!merchant_id || !phone || !amount) {
+      return res.status(400).json({ error: "Missing fields" });
+    }
 
-    const { data, error } = await supabase
-      .from("verifications")
-      .insert({
-        merchant_id,
-        phone,
-        amount,
-        verification_fee: verificationFee,
-        verification_status: "PENDING"
-      })
-      .select()
-      .single();
+    const session_id = crypto.randomUUID();
 
-    if (error) throw error;
+    /* verification fee rules */
+    let verification_fee = 1;
+    if (amount > 1000 && amount <= 5000) verification_fee = 5;
+    else if (amount > 5000 && amount <= 10000) verification_fee = 10;
+    else if (amount > 10000 && amount <= 20000) verification_fee = 15;
+    else if (amount > 20000 && amount <= 30000) verification_fee = 20;
+    else if (amount > 30000 && amount <= 50000) verification_fee = 30;
+    else if (amount > 50000) verification_fee = 50;
 
-    console.log("✅ Verification session created:", data.id);
-
-    // 🔔 Here is where STK push for VERIFICATION FEE would go
-
-    res.json({
-      session_id: data.id,
-      verification_fee: verificationFee,
-      message: `Verification fee KES ${verificationFee} required`
+    /* save verification */
+    const { error } = await supabase.from("verifications").insert({
+      session_id,
+      merchant_id,
+      phone,
+      amount,
+      verification_fee,
+      verification_status: "PENDING",
+      status: "AWAITING_VERIFICATION"
     });
-  } catch (err) {
-    console.error("❌ VERIFY START ERROR:", err);
-    res.status(500).json({ error: "Failed to start verification" });
-  }
-});
 
-// ======================
-// VERIFY STATUS
-// ======================
-app.get("/verify/:sessionId/status", async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-
-    const { data, error } = await supabase
-      .from("verifications")
-      .select("*")
-      .eq("id", sessionId)
-      .single();
-
-    if (error || !data) {
-      return res.status(404).json({ error: "Session not found" });
+    if (error) {
+      console.error("❌ DB INSERT ERROR:", error);
+      return res.status(500).json({ error: "DB error" });
     }
 
-    if (data.verification_status !== "PAID") {
-      return res.status(403).json({ error: "verification required" });
-    }
+    /* STK PUSH (SANDBOX) */
+    const token = await getDarajaToken();
+    const { password, timestamp } = darajaPassword();
 
-    res.json({
-      merchant: {
-        name: "Wanjiru groceries",
-        paybill: "123456"
+    console.log("📤 SENDING STK PUSH (SANDBOX)");
+
+    const stkRes = await fetch(
+      `${DARAJA_BASE}/mpesa/stkpush/v1/processrequest`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          BusinessShortCode: process.env.DARAJA_SHORTCODE,
+          Password: password,
+          Timestamp: timestamp,
+          TransactionType: "CustomerPayBillOnline",
+          Amount: verification_fee,
+          PartyA: phone,
+          PartyB: process.env.DARAJA_SHORTCODE,
+          PhoneNumber: phone,
+          CallBackURL: process.env.DARAJA_CALLBACK_URL,
+          AccountReference: session_id,
+          TransactionDesc: "KonfirmPay verification"
+        })
       }
+    );
+
+    const stkData = await stkRes.json();
+    console.log("📩 STK RESPONSE:", stkData);
+
+    if (stkData.ResponseCode !== "0") {
+      console.error("❌ STK REJECTED:", stkData);
+      return res.status(400).json({ error: "STK rejected", stkData });
+    }
+
+    await supabase
+      .from("verifications")
+      .update({ checkout_request_id: stkData.CheckoutRequestID })
+      .eq("session_id", session_id);
+
+    res.json({
+      session_id,
+      verification_fee,
+      message: `Verification fee KES ${verification_fee} required`
     });
   } catch (err) {
-    console.error("❌ STATUS ERROR:", err);
-    res.status(500).json({ error: "Failed to fetch status" });
+    console.error("❌ VERIFY ERROR:", err);
+    res.status(500).json({ error: "Verification failed" });
   }
 });
 
-// ======================
-// AUTO MERCHANT PAYMENT
-// ======================
-async function autoPayMerchant(verification) {
-  console.log("💰 AUTO PAY MERCHANT START");
-
-  console.log("➡️ Merchant ID:", verification.merchant_id);
-  console.log("➡️ Amount:", verification.amount);
-  console.log("➡️ Phone:", verification.phone);
-
-  // 🔔 REAL merchant STK push would go here
-
-  console.log("✅ MERCHANT PAYMENT TRIGGERED");
-}
-
-// ======================
-// M-PESA CALLBACK
-// ======================
+/* =========================
+   DARAJA CALLBACK
+========================= */
 app.post("/mpesa/callback", async (req, res) => {
   try {
-    console.log("📩 CALLBACK RECEIVED");
-    console.log(JSON.stringify(req.body, null, 2));
+    console.log("📩 CALLBACK:", JSON.stringify(req.body, null, 2));
 
-    const callback = req.body?.Body?.stkCallback;
-    if (!callback) {
-      console.log("⚠️ Invalid callback format");
-      return res.json({ ok: true });
+    const stk = req.body?.Body?.stkCallback;
+    if (!stk) return res.json({ ResultCode: 0 });
+
+    if (stk.ResultCode === 0) {
+      const items = stk.CallbackMetadata.Item;
+      const receipt =
+        items.find(i => i.Name === "MpesaReceiptNumber")?.Value || null;
+
+      await supabase
+        .from("verifications")
+        .update({
+          verification_status: "PAID",
+          status: "VERIFIED",
+          mpesa_receipt: receipt,
+          paid_at: new Date()
+        })
+        .eq("checkout_request_id", stk.CheckoutRequestID);
+
+      console.log("✅ VERIFICATION PAID:", receipt);
+    } else {
+      console.log("❌ PAYMENT FAILED:", stk.ResultDesc);
     }
 
-    if (callback.ResultCode !== 0) {
-      console.log("❌ PAYMENT FAILED:", callback.ResultDesc);
-      return res.json({ ok: true });
-    }
-
-    const items = callback.CallbackMetadata.Item;
-    const receipt =
-      items.find(i => i.Name === "MpesaReceiptNumber")?.Value || null;
-    const checkoutId = callback.CheckoutRequestID;
-
-    console.log("✅ VERIFICATION PAID:", receipt);
-
-    const { data, error } = await supabase
-      .from("verifications")
-      .update({
-        verification_status: "PAID",
-        mpesa_receipt: receipt,
-        checkout_request_id: checkoutId
-      })
-      .eq("checkout_request_id", checkoutId)
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    // 🔥 AUTO PAY MERCHANT HERE 🔥
-    await autoPayMerchant(data);
-
-    res.json({ ok: true });
+    res.json({ ResultCode: 0 });
   } catch (err) {
     console.error("❌ CALLBACK ERROR:", err);
-    res.json({ ok: true });
+    res.json({ ResultCode: 0 });
   }
 });
 
-// ======================
-// SERVER
-// ======================
+/* =========================
+   STATUS + MERCHANT REVEAL
+========================= */
+app.get("/verify/:session_id/status", async (req, res) => {
+  const { session_id } = req.params;
+
+  const { data: verification } = await supabase
+    .from("verifications")
+    .select("merchant_id, verification_status")
+    .eq("session_id", session_id)
+    .single();
+
+  if (!verification) {
+    return res.status(404).json({ error: "Not found" });
+  }
+
+  if (verification.verification_status !== "PAID") {
+    return res.status(403).json({ error: "verification required" });
+  }
+
+  const { data: merchant } = await supabase
+    .from("merchants")
+    .select("*")
+    .eq("id", verification.merchant_id)
+    .single();
+
+  res.json({ merchant });
+});
+
+/* =========================
+   SERVER
+========================= */
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`🚀 SERVER RUNNING ON PORT ${PORT}`);
+  console.log(`🚀 KonfirmPay sandbox running on port ${PORT}`);
 });
