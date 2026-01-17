@@ -1,106 +1,100 @@
 import express from "express";
-import fetch from "node-fetch";
 import dotenv from "dotenv";
-import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
+import { createClient } from "@supabase/supabase-js";
 
 dotenv.config();
 
 const app = express();
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
-/* =======================
-   SUPABASE
-======================= */
+// =====================
+// SUPABASE
+// =====================
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-/* =======================
-   HEALTH
-======================= */
-app.get("/", (req, res) => {
-  console.log("HEALTH CHECK HIT");
-  res.send("KonfirmPay backend running");
-});
-
-/* =======================
-   DARAJA TOKEN
-======================= */
-async function getMpesaToken() {
+// =====================
+// MPESA HELPERS
+// =====================
+const getAccessToken = async () => {
   const auth = Buffer.from(
     `${process.env.MPESA_CONSUMER_KEY}:${process.env.MPESA_CONSUMER_SECRET}`
   ).toString("base64");
 
-  const r = await fetch(
+  const res = await fetch(
     "https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials",
     {
       headers: { Authorization: `Basic ${auth}` },
     }
   );
 
-  const data = await r.json();
+  const data = await res.json();
   return data.access_token;
-}
+};
 
-/* =======================
-   VERIFY START
-======================= */
+const generatePassword = () => {
+  const timestamp = new Date()
+    .toISOString()
+    .replace(/[^0-9]/g, "")
+    .slice(0, 14);
+
+  const password = Buffer.from(
+    process.env.MPESA_SHORTCODE +
+      process.env.MPESA_PASSKEY +
+      timestamp
+  ).toString("base64");
+
+  return { password, timestamp };
+};
+
+// =====================
+// HEALTH CHECK
+// =====================
+app.get("/", (req, res) => {
+  console.log("HEALTH CHECK HIT");
+  res.json({ status: "OK" });
+});
+
+// =====================
+// START VERIFICATION
+// =====================
 app.post("/verify/start", async (req, res) => {
   try {
-    const { merchant_id, phone, amount } = req.body;
-
     console.log("VERIFY START:", req.body);
 
+    const { merchant_id, phone, amount } = req.body;
+
     if (!merchant_id || !phone || !amount) {
-      return res.status(400).json({ error: "missing fields" });
+      return res.status(400).json({ error: "Missing fields" });
     }
 
-    const session_id = crypto.randomUUID();
     const verification_fee = 5;
+    const session_id = crypto.randomUUID();
 
-    /* Save verification session */
-    const { error } = await supabase.from("verifications").insert({
-      session_id,
-      merchant_id,
-      phone,
-      amount,
-      verification_fee,
-      verification_status: "pending",
-      status: "active",
-    });
+    // Save verification session
+    const { error: insertError } = await supabase
+      .from("verifications")
+      .insert({
+        session_id,
+        merchant_id,
+        phone,
+        amount,
+        verification_fee,
+        verification_status: "PENDING",
+        status: "AWAITING_PAYMENT",
+      });
 
-    if (error) {
-      console.error("DB INSERT ERROR:", error);
-      return res.status(500).json({ error: "db insert failed" });
+    if (insertError) {
+      console.error("SUPABASE INSERT ERROR:", insertError);
+      return res.status(500).json({ error: "DB insert failed" });
     }
 
-    /* === SANDBOX NOTE ===
-       Sandbox will NOT prompt real phones
-       Use 254708374149 for simulator
-    */
-    const stkPhone =
-      process.env.MPESA_ENV === "sandbox"
-        ? "254708374149"
-        : phone;
-
-    /* STK PUSH */
-    const token = await getMpesaToken();
-
-    const timestamp = new Date()
-      .toISOString()
-      .replace(/[^0-9]/g, "")
-      .slice(0, 14);
-
-    const password = Buffer.from(
-      process.env.MPESA_SHORTCODE +
-        process.env.MPESA_PASSKEY +
-        timestamp
-    ).toString("base64");
-
-    console.log("ABOUT TO SEND STK PUSH");
+    // Trigger STK Push
+    const token = await getAccessToken();
+    const { password, timestamp } = generatePassword();
 
     const stkRes = await fetch(
       "https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest",
@@ -116,12 +110,12 @@ app.post("/verify/start", async (req, res) => {
           Timestamp: timestamp,
           TransactionType: "CustomerPayBillOnline",
           Amount: verification_fee,
-          PartyA: stkPhone,
+          PartyA: phone,
           PartyB: process.env.MPESA_SHORTCODE,
-          PhoneNumber: stkPhone,
+          PhoneNumber: phone,
           CallBackURL: process.env.MPESA_CALLBACK_URL,
           AccountReference: session_id,
-          TransactionDesc: "Verification fee",
+          TransactionDesc: "Verification Fee",
         }),
       }
     );
@@ -129,92 +123,84 @@ app.post("/verify/start", async (req, res) => {
     const stkData = await stkRes.json();
     console.log("STK RESPONSE:", stkData);
 
-    if (stkData.CheckoutRequestID) {
-      await supabase
-        .from("verifications")
-        .update({
-          checkout_request_id: stkData.CheckoutRequestID,
-        })
-        .eq("session_id", session_id);
-    }
+    await supabase
+      .from("verifications")
+      .update({ checkout_request_id: stkData.CheckoutRequestID })
+      .eq("session_id", session_id);
 
     res.json({
       session_id,
       verification_fee,
       message: "Verification fee KES 5 required",
     });
-  } catch (e) {
-    console.error("VERIFY ERROR:", e);
-    res.status(500).json({ error: "verify failed" });
+  } catch (err) {
+    console.error("VERIFY START ERROR:", err);
+    res.status(500).json({ error: "Server error" });
   }
 });
 
-/* =======================
-   MPESA CALLBACK
-======================= */
+// =====================
+// MPESA CALLBACK
+// =====================
 app.post("/mpesa/callback", async (req, res) => {
   try {
     console.log("MPESA CALLBACK:", JSON.stringify(req.body, null, 2));
 
-    const stk = req.body.Body?.stkCallback;
-    if (!stk) return res.sendStatus(200);
+    const callback =
+      req.body.Body.stkCallback;
 
-    const checkoutId = stk.CheckoutRequestID;
-
-    if (stk.ResultCode === 0) {
-      const meta = stk.CallbackMetadata.Item;
-      const receipt = meta.find(i => i.Name === "MpesaReceiptNumber")?.Value;
-
-      await supabase
-        .from("verifications")
-        .update({
-          verification_status: "paid",
-          status: "completed",
-          mpesa_receipt: receipt,
-          paid_at: new Date(),
-        })
-        .eq("checkout_request_id", checkoutId);
-
-      console.log("VERIFICATION PAID:", checkoutId);
-    } else {
-      await supabase
-        .from("verifications")
-        .update({
-          verification_status: "failed",
-        })
-        .eq("checkout_request_id", checkoutId);
-
-      console.log("VERIFICATION FAILED:", checkoutId);
+    if (callback.ResultCode !== 0) {
+      console.log("PAYMENT FAILED");
+      return res.json({ ResultCode: 0, ResultDesc: "Accepted" });
     }
 
-    res.sendStatus(200);
-  } catch (e) {
-    console.error("CALLBACK ERROR:", e);
-    res.sendStatus(200);
+    const items = callback.CallbackMetadata.Item;
+    const receipt = items.find(i => i.Name === "MpesaReceiptNumber")?.Value;
+    const phone = items.find(i => i.Name === "PhoneNumber")?.Value;
+    const checkout = callback.CheckoutRequestID;
+
+    await supabase
+      .from("verifications")
+      .update({
+        mpesa_receipt: receipt,
+        paid_at: new Date(),
+        verification_status: "PAID",
+        status: "VERIFIED",
+      })
+      .eq("checkout_request_id", checkout);
+
+    console.log("VERIFICATION PAID:", checkout);
+
+    res.json({ ResultCode: 0, ResultDesc: "Accepted" });
+  } catch (err) {
+    console.error("CALLBACK ERROR:", err);
+    res.json({ ResultCode: 0, ResultDesc: "Accepted" });
   }
 });
 
-/* =======================
-   VERIFY STATUS
-======================= */
+// =====================
+// CHECK STATUS
+// =====================
 app.get("/verify/:session_id/status", async (req, res) => {
   const { session_id } = req.params;
 
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("verifications")
     .select("*")
     .eq("session_id", session_id)
     .single();
 
-  if (!data) return res.status(404).json({ error: "not found" });
+  if (error || !data) {
+    return res.status(404).json({ error: "Not found" });
+  }
 
   res.json(data);
 });
 
-/* =======================
-   START SERVER
-======================= */
+// =====================
+// START SERVER
+// =====================
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () =>
-  console.log(`SERVER RUNNING ON PORT ${PORT}`)
-);
+app.listen(PORT, () => {
+  console.log("SERVER RUNNING ON PORT", PORT);
+});
