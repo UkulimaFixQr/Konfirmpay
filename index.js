@@ -9,7 +9,7 @@ const app = express();
 app.use(express.json());
 
 /* =========================
-   SUPABASE (SERVICE ROLE)
+   SUPABASE
 ========================= */
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -17,12 +17,12 @@ const supabase = createClient(
 );
 
 /* =========================
-   DARAJA CONSTANTS (SANDBOX)
+   DARAJA (SANDBOX)
 ========================= */
 const DARAJA_BASE = "https://sandbox.safaricom.co.ke";
 
 /* =========================
-   DARAJA ACCESS TOKEN
+   DARAJA TOKEN
 ========================= */
 async function getDarajaToken() {
   const auth = Buffer.from(
@@ -73,7 +73,7 @@ app.get("/", (_, res) => {
 });
 
 /* =========================
-   VERIFY START (STK 1)
+   VERIFY START (STK #1)
 ========================= */
 app.post("/verify/start", async (req, res) => {
   try {
@@ -86,7 +86,7 @@ app.post("/verify/start", async (req, res) => {
 
     const session_id = crypto.randomUUID();
 
-    /* verification fee rules */
+    // verification fee rules
     let verification_fee = 1;
     if (amount > 1000 && amount <= 5000) verification_fee = 5;
     else if (amount > 5000 && amount <= 10000) verification_fee = 10;
@@ -95,8 +95,7 @@ app.post("/verify/start", async (req, res) => {
     else if (amount > 30000 && amount <= 50000) verification_fee = 30;
     else if (amount > 50000) verification_fee = 50;
 
-    /* save verification */
-    const { error } = await supabase.from("verifications").insert({
+    await supabase.from("verifications").insert({
       session_id,
       merchant_id,
       phone,
@@ -106,16 +105,10 @@ app.post("/verify/start", async (req, res) => {
       status: "AWAITING_VERIFICATION"
     });
 
-    if (error) {
-      console.error("❌ DB INSERT ERROR:", error);
-      return res.status(500).json({ error: "DB error" });
-    }
-
-    /* STK PUSH (SANDBOX) */
     const token = await getDarajaToken();
     const { password, timestamp } = darajaPassword();
 
-    console.log("📤 SENDING STK PUSH (SANDBOX)");
+    console.log("📤 SENDING STK #1 (VERIFICATION)");
 
     const stkRes = await fetch(
       `${DARAJA_BASE}/mpesa/stkpush/v1/processrequest`,
@@ -142,12 +135,7 @@ app.post("/verify/start", async (req, res) => {
     );
 
     const stkData = await stkRes.json();
-    console.log("📩 STK RESPONSE:", stkData);
-
-    if (stkData.ResponseCode !== "0") {
-      console.error("❌ STK REJECTED:", stkData);
-      return res.status(400).json({ error: "STK rejected", stkData });
-    }
+    console.log("📩 STK #1 RESPONSE:", stkData);
 
     await supabase
       .from("verifications")
@@ -166,7 +154,7 @@ app.post("/verify/start", async (req, res) => {
 });
 
 /* =========================
-   DARAJA CALLBACK
+   CALLBACK (STK #1 → STK #2)
 ========================= */
 app.post("/mpesa/callback", async (req, res) => {
   try {
@@ -175,60 +163,76 @@ app.post("/mpesa/callback", async (req, res) => {
     const stk = req.body?.Body?.stkCallback;
     if (!stk) return res.json({ ResultCode: 0 });
 
-    if (stk.ResultCode === 0) {
-      const items = stk.CallbackMetadata.Item;
-      const receipt =
-        items.find(i => i.Name === "MpesaReceiptNumber")?.Value || null;
+    const checkoutId = stk.CheckoutRequestID;
 
-      await supabase
-        .from("verifications")
-        .update({
-          verification_status: "PAID",
-          status: "VERIFIED",
-          mpesa_receipt: receipt,
-          paid_at: new Date()
-        })
-        .eq("checkout_request_id", stk.CheckoutRequestID);
-
-      console.log("✅ VERIFICATION PAID:", receipt);
-    } else {
+    if (stk.ResultCode !== 0) {
       console.log("❌ PAYMENT FAILED:", stk.ResultDesc);
+      return res.json({ ResultCode: 0 });
     }
+
+    const items = stk.CallbackMetadata.Item;
+    const receipt =
+      items.find(i => i.Name === "MpesaReceiptNumber")?.Value || null;
+
+    // 1️⃣ Mark verification PAID
+    const { data: verification } = await supabase
+      .from("verifications")
+      .update({
+        verification_status: "PAID",
+        status: "VERIFIED",
+        mpesa_receipt: receipt,
+        paid_at: new Date()
+      })
+      .eq("checkout_request_id", checkoutId)
+      .select()
+      .single();
+
+    console.log("✅ VERIFICATION PAID:", receipt);
+
+    // 2️⃣ FETCH MERCHANT
+    const { data: merchant } = await supabase
+      .from("merchants")
+      .select("paybill")
+      .eq("id", verification.merchant_id)
+      .single();
+
+    // 3️⃣ SEND STK #2 (MERCHANT PAYMENT)
+    const token = await getDarajaToken();
+    const { password, timestamp } = darajaPassword();
+
+    console.log("📤 SENDING STK #2 (MERCHANT PAYMENT)");
+
+    await fetch(
+      `${DARAJA_BASE}/mpesa/stkpush/v1/processrequest`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          BusinessShortCode: merchant.paybill,
+          Password: password,
+          Timestamp: timestamp,
+          TransactionType: "CustomerPayBillOnline",
+          Amount: verification.amount,
+          PartyA: verification.phone,
+          PartyB: merchant.paybill,
+          PhoneNumber: verification.phone,
+          CallBackURL: process.env.DARAJA_CALLBACK_URL,
+          AccountReference: verification.session_id,
+          TransactionDesc: "Merchant payment"
+        })
+      }
+    );
+
+    console.log("✅ STK #2 SENT");
 
     res.json({ ResultCode: 0 });
   } catch (err) {
     console.error("❌ CALLBACK ERROR:", err);
     res.json({ ResultCode: 0 });
   }
-});
-
-/* =========================
-   STATUS + MERCHANT REVEAL
-========================= */
-app.get("/verify/:session_id/status", async (req, res) => {
-  const { session_id } = req.params;
-
-  const { data: verification } = await supabase
-    .from("verifications")
-    .select("merchant_id, verification_status")
-    .eq("session_id", session_id)
-    .single();
-
-  if (!verification) {
-    return res.status(404).json({ error: "Not found" });
-  }
-
-  if (verification.verification_status !== "PAID") {
-    return res.status(403).json({ error: "verification required" });
-  }
-
-  const { data: merchant } = await supabase
-    .from("merchants")
-    .select("*")
-    .eq("id", verification.merchant_id)
-    .single();
-
-  res.json({ merchant });
 });
 
 /* =========================
